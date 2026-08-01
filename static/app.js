@@ -17,9 +17,18 @@ const parcelForm = document.querySelector("#parcel-form");
 const parcelFile = document.querySelector("#parcel-file");
 const parcelFileLabel = document.querySelector("#parcel-file-label");
 const parcelDropzone = document.querySelector(".parcel-dropzone");
-const parcelAnalyzeButton = parcelForm.querySelector("button[type=submit]");
 const parcelError = document.querySelector("#parcel-error");
 const parcelState = document.querySelector("#parcel-state");
+const parcelManual = document.querySelector("#parcel-manual");
+const manualCanvas = document.querySelector("#parcel-manual-canvas");
+const manualContext = manualCanvas.getContext("2d");
+const manualError = document.querySelector("#manual-error");
+const manualCropSize = document.querySelector("#manual-crop-size");
+const manualBandReadout = document.querySelector("#manual-band-readout");
+const manualLinked = document.querySelector("#manual-linked");
+const manualIndependent = document.querySelector("#manual-independent");
+const manualAuto = document.querySelector("#manual-auto");
+const parcelCompose = document.querySelector("#parcel-compose");
 const parcelResult = document.querySelector("#parcel-result");
 const parcelPreview = document.querySelector("#parcel-preview");
 const parcelPrintButton = document.querySelector("#parcel-print");
@@ -33,6 +42,14 @@ let currentJobStateTarget = printState;
 let currentJobErrorTarget = errorBox;
 let pollTimer = null;
 let currentParcelId = null;
+let currentParcelDraftId = null;
+let parcelDraft = null;
+let parcelPageImage = null;
+let manualCrop = { x0: .03, y0: .03, x1: .97, y1: .97 };
+let manualCuts = [];
+let manualMoveMode = "linked";
+let activeManualCut = null;
+let manualDrag = null;
 
 textarea.addEventListener("input", () => { count.textContent = textarea.value.length; });
 
@@ -288,16 +305,254 @@ dropzone.addEventListener("drop", (event) => {
   }
 });
 
-function useParcelFiles(files) {
-  const file = files?.[0];
-  parcelFileLabel.textContent = file?.name || "Choisir un bordereau";
-  parcelResult.classList.add("hidden");
-  parcelError.textContent = "";
-  parcelState.textContent = "";
-  currentParcelId = null;
+function normalizedCropPayload() {
+  return Object.fromEntries(Object.entries(manualCrop).map(([key, value]) => [key, Math.round(value * 1000)]));
 }
 
-parcelFile.addEventListener("change", () => useParcelFiles(parcelFile.files));
+function equalizeManualCuts() {
+  if (!parcelDraft) return;
+  const cropHeightMm = (manualCrop.y1 - manualCrop.y0) * parcelDraft.height_mm;
+  const bandCount = Math.max(1, Math.ceil(cropHeightMm / 46.9));
+  manualCuts = Array.from({ length: bandCount - 1 }, (_, index) => (index + 1) / bandCount);
+  activeManualCut = manualCuts.length ? 0 : null;
+}
+
+function updateManualReadout() {
+  if (!parcelDraft) return;
+  const widthMm = (manualCrop.x1 - manualCrop.x0) * parcelDraft.width_mm;
+  const heightMm = (manualCrop.y1 - manualCrop.y0) * parcelDraft.height_mm;
+  const boundaries = [0, ...manualCuts, 1];
+  const bands = boundaries.slice(0, -1).map((value, index) => (boundaries[index + 1] - value) * heightMm);
+  const invalid = bands.some((value) => value > 46.9 + .05);
+  manualCropSize.textContent = `${widthMm.toFixed(1)} × ${heightMm.toFixed(1)} MM`;
+  manualBandReadout.textContent = `${String(bands.length).padStart(2, "0")} BANDES · ${bands.map((value) => value.toFixed(1)).join(" / ")} MM`;
+  manualBandReadout.classList.toggle("invalid", invalid);
+  parcelCompose.disabled = invalid;
+  parcelCompose.title = invalid ? "Une bande dépasse 46,9 mm" : "";
+}
+
+function drawManualEditor() {
+  if (!parcelPageImage) return;
+  const width = manualCanvas.width;
+  const height = manualCanvas.height;
+  manualContext.clearRect(0, 0, width, height);
+  manualContext.drawImage(parcelPageImage, 0, 0, width, height);
+  const x0 = manualCrop.x0 * width;
+  const y0 = manualCrop.y0 * height;
+  const x1 = manualCrop.x1 * width;
+  const y1 = manualCrop.y1 * height;
+
+  manualContext.fillStyle = "rgba(8, 10, 13, .68)";
+  manualContext.fillRect(0, 0, width, y0);
+  manualContext.fillRect(0, y1, width, height - y1);
+  manualContext.fillRect(0, y0, x0, y1 - y0);
+  manualContext.fillRect(x1, y0, width - x1, y1 - y0);
+  manualContext.strokeStyle = "#ff7a21";
+  manualContext.lineWidth = Math.max(3, width / 420);
+  manualContext.strokeRect(x0, y0, x1 - x0, y1 - y0);
+
+  const handleSize = Math.max(12, width / 70);
+  manualContext.fillStyle = "#ff7a21";
+  [[x0, y0], [x1, y0], [x0, y1], [x1, y1]].forEach(([x, y]) => {
+    manualContext.fillRect(x - handleSize / 2, y - handleSize / 2, handleSize, handleSize);
+  });
+
+  manualCuts.forEach((position, index) => {
+    const y = y0 + position * (y1 - y0);
+    const selected = index === activeManualCut;
+    manualContext.strokeStyle = selected ? "#ff7a21" : "#03c3cc";
+    manualContext.lineWidth = selected ? Math.max(5, width / 300) : Math.max(3, width / 430);
+    manualContext.beginPath();
+    manualContext.moveTo(x0, y);
+    manualContext.lineTo(x1, y);
+    manualContext.stroke();
+    const labelWidth = Math.max(58, width / 16);
+    const labelHeight = Math.max(22, width / 52);
+    manualContext.fillStyle = selected ? "#ff7a21" : "#03c3cc";
+    manualContext.fillRect(x0, y - labelHeight, labelWidth, labelHeight);
+    manualContext.fillStyle = "#101216";
+    manualContext.font = `700 ${Math.max(11, width / 105)}px monospace`;
+    manualContext.fillText(`CUT ${index + 1}`, x0 + 7, y - 7);
+  });
+  updateManualReadout();
+}
+
+function manualCanvasPoint(event) {
+  const bounds = manualCanvas.getBoundingClientRect();
+  return {
+    x: (event.clientX - bounds.left) * manualCanvas.width / bounds.width,
+    y: (event.clientY - bounds.top) * manualCanvas.height / bounds.height,
+    hit: 13 * manualCanvas.width / bounds.width,
+  };
+}
+
+function manualHitTarget(point) {
+  const width = manualCanvas.width;
+  const height = manualCanvas.height;
+  const x0 = manualCrop.x0 * width;
+  const y0 = manualCrop.y0 * height;
+  const x1 = manualCrop.x1 * width;
+  const y1 = manualCrop.y1 * height;
+  const handles = [
+    ["nw", x0, y0], ["ne", x1, y0], ["sw", x0, y1], ["se", x1, y1],
+  ];
+  const handle = handles.find(([, x, y]) => Math.hypot(point.x - x, point.y - y) <= point.hit * 1.5);
+  if (handle) return { type: "handle", corner: handle[0] };
+  const line = manualCuts.findIndex((position) => {
+    const y = y0 + position * (y1 - y0);
+    return point.x >= x0 && point.x <= x1 && Math.abs(point.y - y) <= point.hit;
+  });
+  if (line !== -1) return { type: "line", index: line };
+  if (point.x >= x0 && point.x <= x1 && point.y >= y0 && point.y <= y1) return { type: "crop" };
+  return null;
+}
+
+manualCanvas.addEventListener("pointerdown", (event) => {
+  if (!parcelPageImage) return;
+  const point = manualCanvasPoint(event);
+  const target = manualHitTarget(point);
+  if (!target) return;
+  event.preventDefault();
+  manualCanvas.setPointerCapture(event.pointerId);
+  if (target.type === "line") activeManualCut = target.index;
+  manualDrag = {
+    ...target,
+    start: point,
+    crop: { ...manualCrop },
+    cuts: [...manualCuts],
+  };
+  drawManualEditor();
+});
+
+manualCanvas.addEventListener("pointermove", (event) => {
+  if (!manualDrag) return;
+  const point = manualCanvasPoint(event);
+  const dx = (point.x - manualDrag.start.x) / manualCanvas.width;
+  const dy = (point.y - manualDrag.start.y) / manualCanvas.height;
+  if (manualDrag.type === "crop") {
+    const width = manualDrag.crop.x1 - manualDrag.crop.x0;
+    const height = manualDrag.crop.y1 - manualDrag.crop.y0;
+    const x0 = Math.max(0, Math.min(1 - width, manualDrag.crop.x0 + dx));
+    const y0 = Math.max(0, Math.min(1 - height, manualDrag.crop.y0 + dy));
+    manualCrop = { x0, y0, x1: x0 + width, y1: y0 + height };
+  } else if (manualDrag.type === "handle") {
+    const minimum = .06;
+    manualCrop = { ...manualDrag.crop };
+    if (manualDrag.corner.includes("w")) manualCrop.x0 = Math.max(0, Math.min(manualCrop.x1 - minimum, manualDrag.crop.x0 + dx));
+    if (manualDrag.corner.includes("e")) manualCrop.x1 = Math.min(1, Math.max(manualCrop.x0 + minimum, manualDrag.crop.x1 + dx));
+    if (manualDrag.corner.includes("n")) manualCrop.y0 = Math.max(0, Math.min(manualCrop.y1 - minimum, manualDrag.crop.y0 + dy));
+    if (manualDrag.corner.includes("s")) manualCrop.y1 = Math.min(1, Math.max(manualCrop.y0 + minimum, manualDrag.crop.y1 + dy));
+  } else if (manualDrag.type === "line") {
+    const cropHeight = (manualDrag.crop.y1 - manualDrag.crop.y0) * manualCanvas.height;
+    const delta = (point.y - manualDrag.start.y) / cropHeight;
+    if (manualMoveMode === "linked") {
+      const low = .01 - Math.min(...manualDrag.cuts);
+      const high = .99 - Math.max(...manualDrag.cuts);
+      const safeDelta = Math.max(low, Math.min(high, delta));
+      manualCuts = manualDrag.cuts.map((value) => value + safeDelta);
+    } else {
+      const index = manualDrag.index;
+      const low = index ? manualDrag.cuts[index - 1] + .01 : .01;
+      const high = index < manualDrag.cuts.length - 1 ? manualDrag.cuts[index + 1] - .01 : .99;
+      manualCuts = [...manualDrag.cuts];
+      manualCuts[index] = Math.max(low, Math.min(high, manualDrag.cuts[index] + delta));
+    }
+  }
+  drawManualEditor();
+});
+
+function endManualDrag(event) {
+  if (manualDrag && manualCanvas.hasPointerCapture(event.pointerId)) manualCanvas.releasePointerCapture(event.pointerId);
+  manualDrag = null;
+}
+manualCanvas.addEventListener("pointerup", endManualDrag);
+manualCanvas.addEventListener("pointercancel", endManualDrag);
+
+function setManualCropPreset(name) {
+  if (name === "right") manualCrop = { x0: .58, y0: .06, x1: .98, y1: .94 };
+  else if (name === "chronopost") manualCrop = { x0: .608, y0: .155, x1: .98, y1: .842 };
+  else manualCrop = { x0: .03, y0: .03, x1: .97, y1: .97 };
+  equalizeManualCuts();
+  drawManualEditor();
+}
+
+document.querySelectorAll("[data-crop-preset]").forEach((button) => {
+  button.addEventListener("click", () => setManualCropPreset(button.dataset.cropPreset));
+});
+
+manualLinked.addEventListener("click", () => {
+  manualMoveMode = "linked";
+  manualLinked.classList.add("active");
+  manualIndependent.classList.remove("active");
+});
+manualIndependent.addEventListener("click", () => {
+  manualMoveMode = "independent";
+  manualIndependent.classList.add("active");
+  manualLinked.classList.remove("active");
+});
+
+document.querySelector("#manual-add-cut").addEventListener("click", () => {
+  const boundaries = [0, ...manualCuts, 1];
+  let widestIndex = 0;
+  for (let index = 1; index < boundaries.length - 1; index += 1) {
+    if (boundaries[index + 1] - boundaries[index] > boundaries[widestIndex + 1] - boundaries[widestIndex]) widestIndex = index;
+  }
+  const position = (boundaries[widestIndex] + boundaries[widestIndex + 1]) / 2;
+  manualCuts.push(position);
+  manualCuts.sort((a, b) => a - b);
+  activeManualCut = manualCuts.indexOf(position);
+  drawManualEditor();
+});
+
+document.querySelector("#manual-remove-cut").addEventListener("click", () => {
+  if (!manualCuts.length) return;
+  const index = activeManualCut ?? manualCuts.length - 1;
+  manualCuts.splice(index, 1);
+  activeManualCut = manualCuts.length ? Math.min(index, manualCuts.length - 1) : null;
+  drawManualEditor();
+});
+
+async function loadParcelDraft(file) {
+  parcelFileLabel.textContent = file?.name || "Choisir un bordereau";
+  parcelError.textContent = "";
+  manualError.textContent = "";
+  parcelState.textContent = "Chargement de la page complète…";
+  parcelManual.classList.add("hidden");
+  parcelResult.classList.add("hidden");
+  currentParcelId = null;
+  currentParcelDraftId = null;
+  if (!file) return;
+  try {
+    const data = new FormData();
+    data.set("file", file);
+    const response = await fetch("/api/parcels/prepare", { method: "POST", body: data });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || "Impossible d’ouvrir le bordereau");
+    parcelDraft = result;
+    currentParcelDraftId = result.id;
+    parcelPageImage = new Image();
+    await new Promise((resolve, reject) => {
+      parcelPageImage.onload = resolve;
+      parcelPageImage.onerror = reject;
+      parcelPageImage.src = `${result.page_url}?v=${Date.now()}`;
+    });
+    manualCanvas.width = parcelPageImage.naturalWidth;
+    manualCanvas.height = parcelPageImage.naturalHeight;
+    document.querySelector("#manual-page-size").textContent = `${result.width_mm} × ${result.height_mm} MM`;
+    manualCrop = { x0: .03, y0: .03, x1: .97, y1: .97 };
+    equalizeManualCuts();
+    parcelManual.classList.remove("hidden");
+    parcelState.textContent = "Page chargée · ajustez le cadre orange et les traits cyan";
+    drawManualEditor();
+    parcelManual.scrollIntoView({ behavior: "smooth", block: "start" });
+  } catch (error) {
+    parcelState.textContent = "";
+    parcelError.textContent = error.message;
+  }
+}
+
+parcelFile.addEventListener("change", () => loadParcelDraft(parcelFile.files?.[0]));
+parcelForm.addEventListener("submit", (event) => event.preventDefault());
 
 ["dragenter", "dragover"].forEach((name) => parcelDropzone.addEventListener(name, (event) => {
   event.preventDefault();
@@ -310,21 +565,21 @@ parcelFile.addEventListener("change", () => useParcelFiles(parcelFile.files));
 parcelDropzone.addEventListener("drop", (event) => {
   if (event.dataTransfer.files.length) {
     parcelFile.files = event.dataTransfer.files;
-    useParcelFiles(event.dataTransfer.files);
+    loadParcelDraft(event.dataTransfer.files[0]);
   }
 });
 
 function presentParcel(result) {
   currentParcelId = result.id;
   document.querySelector("#parcel-carrier").textContent = result.carrier;
-  document.querySelector("#parcel-confidence").textContent = `${Math.round(result.confidence * 100)}%`;
+  document.querySelector("#parcel-confidence").textContent = result.model === "manual" ? "MANUEL" : `${Math.round(result.confidence * 100)}%`;
   document.querySelector("#parcel-format").textContent = `${result.label_width_mm} × ${result.label_height_mm} mm`;
   document.querySelector("#parcel-band-count").textContent = String(result.band_count).padStart(2, "0");
   const rollMillimeters = Math.round(result.roll_height / 300 * 25.4);
   document.querySelector("#parcel-roll-length").textContent = `${rollMillimeters} mm`;
-  document.querySelector("#parcel-side").textContent = `ZONE ${result.document_side.toUpperCase()}`;
+  document.querySelector("#parcel-side").textContent = result.document_side === "custom" ? "ZONE PERSONNALISÉE" : `ZONE ${result.document_side.toUpperCase()}`;
   document.querySelector("#parcel-preview-size").textContent = `${result.band_count} BANDES · 300 DPI`;
-  document.querySelector("#parcel-notes").textContent = result.notes || "Coupes validées hors des zones critiques.";
+  document.querySelector("#parcel-notes").textContent = result.notes || "Cadre et coupes préparés manuellement.";
   const bandList = document.querySelector("#parcel-band-list");
   bandList.replaceChildren(...result.band_heights_mm.map((height, index) => {
     const chip = document.createElement("span");
@@ -336,31 +591,51 @@ function presentParcel(result) {
   parcelResult.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
-parcelForm.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  parcelError.textContent = "";
-  parcelState.textContent = "";
-  parcelResult.classList.add("hidden");
-  if (!parcelFile.files.length) {
-    parcelError.textContent = "Choisissez un bordereau PDF ou une image";
-    return;
-  }
-  parcelAnalyzeButton.disabled = true;
-  parcelAnalyzeButton.querySelector("span:first-child").textContent = "Gemma analyse le document…";
-  parcelState.textContent = "Détection du transporteur, des codes et des lignes de coupe";
+manualAuto.addEventListener("click", async () => {
+  if (!currentParcelDraftId) return;
+  manualError.textContent = "";
+  manualAuto.disabled = true;
+  manualAuto.querySelector("span:first-child").childNodes[0].textContent = "Calcul en cours ";
   try {
-    const data = new FormData(parcelForm);
-    const response = await fetch("/api/parcels/analyze", { method: "POST", body: data });
+    const response = await fetch(`/api/parcels/drafts/${currentParcelDraftId}/auto`, { method: "POST" });
     const result = await response.json();
-    if (!response.ok) throw new Error(result.error || "Impossible d’analyser le bordereau");
-    presentParcel(result);
-    parcelState.textContent = "Analyse terminée · vérifiez les lignes rouges avant impression";
+    if (!response.ok) throw new Error(result.error || "Auto calcul indisponible");
+    manualCrop = Object.fromEntries(Object.entries(result.crop).map(([key, value]) => [key, value / 1000]));
+    manualCuts = result.cuts.map((value) => value / 1000).sort((a, b) => a - b);
+    activeManualCut = manualCuts.length ? 0 : null;
+    parcelState.textContent = `Suggestion ${result.carrier} · ${Math.round(result.confidence * 100)}% · vérifiez tout`;
+    drawManualEditor();
   } catch (error) {
-    parcelState.textContent = "";
-    parcelError.textContent = error.message;
+    manualError.textContent = error.message;
   } finally {
-    parcelAnalyzeButton.disabled = false;
-    parcelAnalyzeButton.querySelector("span:first-child").textContent = "Analyser la mise en page";
+    manualAuto.disabled = false;
+    manualAuto.querySelector("span:first-child").childNodes[0].textContent = "Auto calcul ";
+  }
+});
+
+parcelCompose.addEventListener("click", async () => {
+  if (!currentParcelDraftId) return;
+  manualError.textContent = "";
+  parcelCompose.disabled = true;
+  parcelCompose.querySelector("span:first-child").textContent = "Construction du rouleau…";
+  try {
+    const response = await fetch(`/api/parcels/drafts/${currentParcelDraftId}/compose`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        crop: normalizedCropPayload(),
+        cuts: manualCuts.map((value) => Math.round(value * 1000)),
+      }),
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || "Impossible de préparer les bandes");
+    presentParcel(result);
+    parcelState.textContent = "Sortie construite localement · vérifiez l’aperçu avant impression";
+  } catch (error) {
+    manualError.textContent = error.message;
+  } finally {
+    parcelCompose.querySelector("span:first-child").textContent = "Préparer les bandes";
+    updateManualReadout();
   }
 });
 

@@ -1,4 +1,4 @@
-"""AI-assisted shipping-label detection and deterministic S002 strip tiling."""
+"""Manual-first shipping-label cropping and deterministic S002 strip tiling."""
 
 from __future__ import annotations
 
@@ -378,6 +378,20 @@ def _normalized_box(raw: dict[str, Any], width: int, height: int) -> Box:
     return Box(x0, y0, x1, y1)
 
 
+def _manual_box(raw: dict[str, Any], width: int, height: int) -> Box:
+    values = [int(raw.get(key, 0)) for key in ("x0", "y0", "x1", "y1")]
+    x0, y0, x1, y1 = values
+    box = Box(
+        round(max(0, min(1000, x0)) * width / 1000),
+        round(max(0, min(1000, y0)) * height / 1000),
+        round(max(0, min(1000, x1)) * width / 1000),
+        round(max(0, min(1000, y1)) * height / 1000),
+    )
+    if box.width < max(8, width * 0.02) or box.height < max(8, height * 0.02):
+        raise ParcelError("Le cadre manuel est trop petit")
+    return box
+
+
 def _dark_fraction_vertical(gray: Image.Image, x: int, y0: int, y1: int) -> float:
     pixels = gray.load()
     values = range(max(0, y0), min(gray.height, y1), 2)
@@ -741,3 +755,74 @@ def analyze_parcel(filename: str, content: bytes) -> ParcelOutput:
         roll=roll,
         model=str(analysis.get("model") or DEFAULT_MODEL),
     )
+
+
+def compose_manual_parcel(
+    filename: str,
+    content: bytes,
+    crop: dict[str, Any],
+    normalized_cuts: list[int],
+) -> ParcelOutput:
+    """Render a user-selected crop and explicit cut positions without AI."""
+    document = prepare_document(filename, content)
+    box = _manual_box(crop, document.ai_image.width, document.ai_image.height)
+    label, width_mm, height_mm = _render_label(document, box, 0)
+    cuts = tuple(
+        sorted(
+            {
+                round(max(1, min(999, int(value))) * label.height / 1000)
+                for value in normalized_cuts
+            }
+        )
+    )
+    boundaries = (0, *cuts, label.height)
+    if any(
+        end <= start
+        for start, end in zip(boundaries, boundaries[1:], strict=False)
+    ):
+        raise ParcelError("Les lignes de coupe doivent être distinctes et ordonnées")
+    if any(
+        end - start > PRINT_WIDTH
+        for start, end in zip(boundaries, boundaries[1:], strict=False)
+    ):
+        raise ParcelError(
+            "Une bande dépasse 46,9 mm : ajoutez une coupe ou rapprochez les lignes"
+        )
+    roll, band_heights = build_roll(label, cuts)
+    return ParcelOutput(
+        carrier="Découpe manuelle",
+        confidence=1.0,
+        document_side="custom",
+        notes="Cadre et lignes définis manuellement. Aucun modèle utilisé.",
+        label_width_mm=width_mm,
+        label_height_mm=height_mm,
+        cuts_px=cuts,
+        band_heights_mm=band_heights,
+        preview=build_preview(label, cuts),
+        roll=roll,
+        model="manual",
+    )
+
+
+def automatic_layout(filename: str, content: bytes) -> dict[str, Any]:
+    """Return optional AI hints without producing or printing a parcel roll."""
+    document = prepare_document(filename, content)
+    analysis = cached_analysis(document)
+    box = snap_label_box(document.ai_image, analysis["label_box"])
+    rotation = int(analysis.get("rotation", 0))
+    if rotation:
+        raise ParcelError("Rotation automatique non prise en charge ; cadrez la page manuellement")
+    label, _width_mm, _height_mm = _render_label(document, box, rotation)
+    cuts = choose_cuts(label, analysis, rotation)
+    return {
+        "crop": {
+            "x0": round(box.x0 * 1000 / document.ai_image.width),
+            "y0": round(box.y0 * 1000 / document.ai_image.height),
+            "x1": round(box.x1 * 1000 / document.ai_image.width),
+            "y1": round(box.y1 * 1000 / document.ai_image.height),
+        },
+        "cuts": [round(value * 1000 / label.height) for value in cuts],
+        "carrier": str(analysis.get("carrier") or "Transporteur"),
+        "confidence": float(analysis.get("confidence", 0)),
+        "model": str(analysis.get("model") or DEFAULT_MODEL),
+    }

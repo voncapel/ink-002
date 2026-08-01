@@ -13,10 +13,10 @@ untrusted network.
   Basic authentication.
 - Never commit `/etc/s002-web.env`, tunnel credential JSON files, live tunnel
   configuration, logs, or runtime job images.
-- Shipping labels contain personal data. The COLIS workflow sends a downsampled
-  image of the first page to the configured OpenRouter model for geometric
-  detection. Do not enable it unless that processing is acceptable for your
-  documents and deployment.
+- Shipping labels contain personal data. The COLIS workflow is manual and local
+  by default. Its optional **Auto calcul** action sends a downsampled image of
+  the first page to the configured OpenRouter model. Do not click it unless that
+  processing is acceptable for your documents and deployment.
 - Treat printed uploads as untrusted input. The app limits uploads to 16 MiB,
   PDFs to 20 pages, and rendered output to 30,000 rows.
 

@@ -169,10 +169,10 @@
     <section class="view" id="parcel-view" aria-labelledby="parcel-title" hidden>
       <div class="view-head">
         <div>
-          <p class="kicker parcel-kicker">VISION / ÉCHELLE 1:1</p>
+          <p class="kicker parcel-kicker">MANUEL / ÉCHELLE 1:1</p>
           <h1 id="parcel-title">Étiquette colis</h1>
         </div>
-        <p class="view-note">Détection du bordereau utile.<br>Découpe en bandes pleine échelle.</p>
+        <p class="view-note">Cadrez la zone utile.<br>Placez les coupes à la main.</p>
       </div>
 
       <div class="parcel-workbench">
@@ -181,7 +181,7 @@
             <span class="parcel-step-number">01</span>
             <div>
               <strong>Déposer le bordereau</strong>
-              <small>PDF ou image · première page analysée</small>
+              <small>PDF ou image · aperçu immédiat de la première page</small>
             </div>
           </div>
           <label class="parcel-dropzone" for="parcel-file">
@@ -192,24 +192,76 @@
               <small>ou le déposer ici</small>
             </span>
           </label>
-          <div class="parcel-ai-note">
-            <span>GEMMA / 31B</span>
-            <p>L’image du document est envoyée à OpenRouter pour localiser l’étiquette et les codes. Le découpage final reste local.</p>
+          <div class="parcel-ai-note local-note">
+            <span>100% LOCAL</span>
+            <p>L’upload ouvre directement l’atelier manuel. Rien n’est envoyé à un modèle sauf si vous cliquez explicitement sur « Auto calcul ».</p>
           </div>
-          <button class="parcel-analyze-button" type="submit">
-            <span>Analyser la mise en page</span>
-            <span aria-hidden="true">⌁</span>
-          </button>
           <p class="form-error" id="parcel-error" role="alert"></p>
           <p class="parcel-state" id="parcel-state" aria-live="polite"></p>
         </form>
+
+        <section class="parcel-manual hidden" id="parcel-manual" aria-live="polite">
+          <div class="preview-head">
+            <div>
+              <span class="tab-index">02</span>
+              <strong>Atelier de découpe</strong>
+            </div>
+            <span id="manual-page-size">PAGE COMPLÈTE</span>
+          </div>
+          <div class="manual-workspace">
+            <div class="manual-canvas-stage">
+              <canvas id="parcel-manual-canvas" aria-label="Page complète avec cadre et lignes de coupe ajustables"></canvas>
+            </div>
+            <aside class="manual-tools">
+              <div class="manual-readout">
+                <span>ZONE UTILE</span>
+                <strong id="manual-crop-size">—</strong>
+                <small id="manual-band-readout">AUCUNE COUPE</small>
+              </div>
+
+              <div class="manual-tool-group">
+                <span class="manual-tool-label">Cadre rapide</span>
+                <div class="manual-button-grid">
+                  <button type="button" data-crop-preset="full">Pleine page</button>
+                  <button type="button" data-crop-preset="right">Droite 40%</button>
+                  <button type="button" data-crop-preset="chronopost">Chronopost</button>
+                </div>
+              </div>
+
+              <div class="manual-tool-group">
+                <span class="manual-tool-label">Déplacement des traits</span>
+                <div class="manual-segmented" role="group" aria-label="Mode de déplacement">
+                  <button class="active" id="manual-linked" type="button">Liés</button>
+                  <button id="manual-independent" type="button">Individuels</button>
+                </div>
+                <p>En mode lié, déplacer un trait décale tous les autres avec le même espacement.</p>
+              </div>
+
+              <div class="manual-tool-group manual-line-actions">
+                <button id="manual-add-cut" type="button"><span>＋</span> Ajouter un trait</button>
+                <button id="manual-remove-cut" type="button"><span>−</span> Retirer le trait actif</button>
+              </div>
+
+              <button class="manual-auto-button" id="manual-auto" type="button">
+                <span>Auto calcul <small>IA · OPTIONNEL</small></span>
+                <span aria-hidden="true">⌁</span>
+              </button>
+              <p class="manual-hint">Glissez le cadre par son centre ou ses quatre poignées. Glissez un trait pour le régler.</p>
+              <p class="form-error" id="manual-error" role="alert"></p>
+              <button class="parcel-compose-button" id="parcel-compose" type="button">
+                <span>Préparer les bandes</span>
+                <span aria-hidden="true">→</span>
+              </button>
+            </aside>
+          </div>
+        </section>
 
         <section class="parcel-result hidden" id="parcel-result" aria-live="polite">
           <div class="parcel-preview-card">
             <div class="preview-head">
               <div>
-                <span class="tab-index">02</span>
-                <strong>Découpe proposée</strong>
+                <span class="tab-index">03</span>
+                <strong>Sortie prête</strong>
               </div>
               <span id="parcel-preview-size">ÉCHELLE 1:1</span>
             </div>
@@ -221,12 +273,12 @@
           <aside class="parcel-summary">
             <div class="parcel-detected">
               <span class="parcel-pulse" aria-hidden="true"></span>
-              <span>Détection validée</span>
+              <span>Découpe préparée</span>
             </div>
-            <p class="parcel-side" id="parcel-side">ZONE DROITE</p>
-            <h2 id="parcel-carrier">Transporteur</h2>
+            <p class="parcel-side" id="parcel-side">ZONE PERSONNALISÉE</p>
+            <h2 id="parcel-carrier">Manuel</h2>
             <div class="parcel-metrics">
-              <div><span>Confiance</span><strong id="parcel-confidence">—</strong></div>
+              <div><span>Mode</span><strong id="parcel-confidence">MANUEL</strong></div>
               <div><span>Format utile</span><strong id="parcel-format">—</strong></div>
               <div><span>Bandes</span><strong id="parcel-band-count">—</strong></div>
               <div><span>Rouleau</span><strong id="parcel-roll-length">—</strong></div>

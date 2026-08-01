@@ -21,24 +21,22 @@ Flask API ──► renderer ──► 554-dot monochrome PNG
                                            S002
 ```
 
-Parcel labels take a separate, deliberately split path:
+Parcel labels take a manual-first path:
 
 ```text
-PDF/image ──► first-page preview ──► OpenRouter vision geometry
-                                         │
-                                         ▼
-                         local frame snap + critical-region checks
-                                         │
-                                         ▼
-                         full-resolution crop + safe cut optimizer
-                                         │
-                                         ▼
-                              554-dot continuous print roll
+PDF/image ──► local first-page preview ──► draggable crop + cut lines
+                                                     │
+                                                     ▼
+                                      full-resolution local composition
+                                                     │
+                                                     ▼
+                                          554-dot continuous print roll
 ```
 
-The model never produces the printable raster. It only proposes normalized
-geometry; the crop, rotation, cut search, full-resolution PDF render, threshold,
-and roll assembly are deterministic local operations in `parcel.py`.
+The optional **Auto calcul** action may ask OpenRouter for normalized geometry,
+but it never produces the printable raster. The user can amend every hint, and
+the crop, full-resolution PDF render, threshold, and roll assembly are
+deterministic local operations in `parcel.py`.
 
 ## Web and API layer
 

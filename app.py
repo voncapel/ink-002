@@ -16,7 +16,14 @@ from dotenv import load_dotenv
 from flask import Flask, jsonify, render_template, request, send_file
 from PIL import Image
 
-from parcel import ParcelError, ParcelOutput, analyze_parcel
+from parcel import (
+    ParcelError,
+    ParcelOutput,
+    analyze_parcel,
+    automatic_layout,
+    compose_manual_parcel,
+    prepare_document,
+)
 from rendering import DITHER_PRESETS, render_text, render_upload
 from s002_protocol import encode_print_job, resolve_transport, send_print_job
 
@@ -47,7 +54,7 @@ def clear_transient_files() -> None:
     """Remove private previews that cannot be recovered after a process restart."""
     for path in JOBS_DIR.glob("*.png"):
         path.unlink(missing_ok=True)
-    for pattern in ("*-preview.png", "*-roll.png"):
+    for pattern in ("*-preview.png", "*-roll.png", "*-page.png", "*-source.*"):
         for path in PARCELS_DIR.glob(pattern):
             path.unlink(missing_ok=True)
 
@@ -115,6 +122,62 @@ class ParcelSession:
 
 parcel_sessions: OrderedDict[str, ParcelSession] = OrderedDict()
 parcel_lock = threading.Lock()
+
+
+@dataclass
+class ParcelDraft:
+    id: str
+    filename: str
+    suffix: str
+    width_mm: float
+    height_mm: float
+    preview_width: int
+    preview_height: int
+    created_at: str
+
+    def public(self) -> dict:
+        return {
+            **asdict(self),
+            "page_url": f"/api/parcels/drafts/{self.id}/page",
+        }
+
+
+parcel_drafts: OrderedDict[str, ParcelDraft] = OrderedDict()
+draft_lock = threading.Lock()
+
+
+def save_parcel_draft(filename: str, content: bytes) -> ParcelDraft:
+    document = prepare_document(filename, content)
+    draft_id = uuid.uuid4().hex[:12]
+    source_path = PARCELS_DIR / f"{draft_id}-source{document.suffix}"
+    source_path.write_bytes(content)
+    document.ai_image.save(PARCELS_DIR / f"{draft_id}-page.png", format="PNG", optimize=True)
+    draft = ParcelDraft(
+        id=draft_id,
+        filename=Path(filename).name[:160],
+        suffix=document.suffix,
+        width_mm=round(document.width_points * 25.4 / 72, 1),
+        height_mm=round(document.height_points * 25.4 / 72, 1),
+        preview_width=document.ai_image.width,
+        preview_height=document.ai_image.height,
+        created_at=now_iso(),
+    )
+    with draft_lock:
+        parcel_drafts[draft_id] = draft
+        while len(parcel_drafts) > MAX_PARCELS:
+            old_id, old = parcel_drafts.popitem(last=False)
+            (PARCELS_DIR / f"{old_id}-page.png").unlink(missing_ok=True)
+            (PARCELS_DIR / f"{old_id}-source{old.suffix}").unlink(missing_ok=True)
+    return draft
+
+
+def get_parcel_draft(draft_id: str) -> ParcelDraft | None:
+    with draft_lock:
+        return parcel_drafts.get(draft_id)
+
+
+def read_parcel_draft(draft: ParcelDraft) -> bytes:
+    return (PARCELS_DIR / f"{draft.id}-source{draft.suffix}").read_bytes()
 
 
 def save_parcel(output: ParcelOutput) -> ParcelSession:
@@ -280,6 +343,66 @@ def analyze_parcel_document():
         output = analyze_parcel(upload.filename, content)
         return jsonify(save_parcel(output).public()), 201
     except (ParcelError, RuntimeError, ValueError) as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+@app.post("/api/parcels/prepare")
+def prepare_parcel_document():
+    try:
+        upload = request.files.get("file")
+        if not upload or not upload.filename:
+            raise ParcelError("Choisissez un bordereau PDF ou une image")
+        content = upload.read()
+        if not content:
+            raise ParcelError("Le fichier envoyé est vide")
+        return jsonify(save_parcel_draft(upload.filename, content).public()), 201
+    except (ParcelError, RuntimeError, ValueError) as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+@app.get("/api/parcels/drafts/<draft_id>/page")
+def parcel_draft_page(draft_id: str):
+    if get_parcel_draft(draft_id) is None:
+        return jsonify({"error": "parcel draft not found"}), 404
+    path = PARCELS_DIR / f"{draft_id}-page.png"
+    if not path.is_file():
+        return jsonify({"error": "parcel page not found"}), 404
+    response = send_file(path, mimetype="image/png", max_age=0)
+    response.headers["Cache-Control"] = "private, no-store"
+    return response
+
+
+@app.post("/api/parcels/drafts/<draft_id>/auto")
+def auto_parcel_layout(draft_id: str):
+    try:
+        draft = get_parcel_draft(draft_id)
+        if draft is None:
+            return jsonify({"error": "parcel draft not found"}), 404
+        result = automatic_layout(draft.filename, read_parcel_draft(draft))
+        return jsonify(result)
+    except (ParcelError, RuntimeError, ValueError) as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+@app.post("/api/parcels/drafts/<draft_id>/compose")
+def compose_parcel_layout(draft_id: str):
+    try:
+        draft = get_parcel_draft(draft_id)
+        if draft is None:
+            return jsonify({"error": "parcel draft not found"}), 404
+        payload = request.get_json(silent=True) or {}
+        crop = payload.get("crop")
+        cuts = payload.get("cuts")
+        if not isinstance(crop, dict) or not isinstance(cuts, list):
+            raise ParcelError("Cadre ou lignes de coupe invalides")
+        output = compose_manual_parcel(
+            draft.filename,
+            read_parcel_draft(draft),
+            crop,
+            cuts,
+        )
+        return jsonify(save_parcel(output).public()), 201
+    except (ParcelError, RuntimeError, ValueError, OSError) as exc:
         return jsonify({"error": str(exc)}), 400
 
 
