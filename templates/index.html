@@ -229,24 +229,24 @@
               </div>
 
               <div class="manual-tool-group">
-                <span class="manual-tool-label">Déplacement des traits</span>
+                <span class="manual-tool-label">Répartition des bandes</span>
                 <div class="manual-segmented" role="group" aria-label="Mode de déplacement">
-                  <button class="active" id="manual-linked" type="button">Liés</button>
+                  <button class="active" id="manual-linked" type="button">Égales</button>
                   <button id="manual-independent" type="button">Individuels</button>
                 </div>
-                <p>En mode lié, déplacer un trait décale tous les autres avec le même espacement.</p>
+                <p>En mode égal, le haut et le bas du cadre comptent aussi : toutes les bandes gardent exactement la même hauteur.</p>
               </div>
 
               <div class="manual-tool-group manual-line-actions">
-                <button id="manual-add-cut" type="button"><span>＋</span> Ajouter un trait</button>
-                <button id="manual-remove-cut" type="button"><span>−</span> Retirer le trait actif</button>
+                <button id="manual-add-cut" type="button"><span>＋</span> Ajouter une bande</button>
+                <button id="manual-remove-cut" type="button"><span>−</span> Enlever une bande</button>
               </div>
 
               <button class="manual-auto-button" id="manual-auto" type="button">
                 <span>Auto calcul <small>IA · OPTIONNEL</small></span>
                 <span aria-hidden="true">⌁</span>
               </button>
-              <p class="manual-hint">Glissez le cadre par son centre ou ses quatre poignées. Glissez un trait pour le régler.</p>
+              <p class="manual-hint">Le mode égal redistribue les coupes entre les deux bords. Passez en individuel pour déplacer un trait librement.</p>
               <p class="form-error" id="manual-error" role="alert"></p>
               <button class="parcel-compose-button" id="parcel-compose" type="button">
                 <span>Préparer les bandes</span>

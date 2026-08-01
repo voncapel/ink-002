@@ -761,20 +761,20 @@ def compose_manual_parcel(
     filename: str,
     content: bytes,
     crop: dict[str, Any],
-    normalized_cuts: list[int],
+    normalized_cuts: list[Any],
 ) -> ParcelOutput:
     """Render a user-selected crop and explicit cut positions without AI."""
     document = prepare_document(filename, content)
     box = _manual_box(crop, document.ai_image.width, document.ai_image.height)
     label, width_mm, height_mm = _render_label(document, box, 0)
-    cuts = tuple(
-        sorted(
-            {
-                round(max(1, min(999, int(value))) * label.height / 1000)
-                for value in normalized_cuts
-            }
-        )
-    )
+    cut_ratios = []
+    for value in normalized_cuts:
+        numeric = float(value)
+        # Manual-editor clients send exact 0..1 ratios. Keep accepting the old
+        # per-mille payload so installed/local clients can be upgraded safely.
+        ratio = numeric if 0 < numeric < 1 else numeric / 1000
+        cut_ratios.append(max(1 / label.height, min(1 - 1 / label.height, ratio)))
+    cuts = tuple(sorted({round(ratio * label.height) for ratio in cut_ratios}))
     boundaries = (0, *cuts, label.height)
     if any(
         end <= start

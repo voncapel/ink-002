@@ -327,6 +327,7 @@ select { width: 100%; border: 0; outline: 0; background: transparent; color: var
 .manual-button-grid button:last-child { grid-column: span 2; }
 .manual-button-grid button, .manual-line-actions button, .manual-segmented button { min-height: 40px; padding: 0 10px; border: 1px solid var(--line); background: var(--panel-3); color: #c6cad1; font: 750 8px/1 var(--mono); letter-spacing: .04em; text-transform: uppercase; }
 .manual-button-grid button:hover, .manual-line-actions button:hover { border-color: var(--orange); color: white; }
+.manual-line-actions button:disabled { opacity: .35; cursor: not-allowed; border-color: var(--line); color: var(--muted); }
 .manual-segmented { display: grid; grid-template-columns: 1fr 1fr; margin-top: 12px; }
 .manual-segmented button + button { border-left: 0; }
 .manual-segmented button.active { border-color: var(--cyan); background: rgba(3,195,204,.12); color: var(--cyan); }

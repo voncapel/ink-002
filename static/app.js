@@ -27,6 +27,8 @@ const manualCropSize = document.querySelector("#manual-crop-size");
 const manualBandReadout = document.querySelector("#manual-band-readout");
 const manualLinked = document.querySelector("#manual-linked");
 const manualIndependent = document.querySelector("#manual-independent");
+const manualAddBand = document.querySelector("#manual-add-cut");
+const manualRemoveBand = document.querySelector("#manual-remove-cut");
 const manualAuto = document.querySelector("#manual-auto");
 const parcelCompose = document.querySelector("#parcel-compose");
 const parcelResult = document.querySelector("#parcel-result");
@@ -309,12 +311,20 @@ function normalizedCropPayload() {
   return Object.fromEntries(Object.entries(manualCrop).map(([key, value]) => [key, Math.round(value * 1000)]));
 }
 
+function distributeManualBands(bandCount = manualCuts.length + 1) {
+  const safeBandCount = Math.max(1, Math.min(40, Math.round(bandCount)));
+  manualCuts = Array.from(
+    { length: safeBandCount - 1 },
+    (_, index) => (index + 1) / safeBandCount,
+  );
+  activeManualCut = manualCuts.length ? Math.min(activeManualCut ?? 0, manualCuts.length - 1) : null;
+}
+
 function equalizeManualCuts() {
   if (!parcelDraft) return;
   const cropHeightMm = (manualCrop.y1 - manualCrop.y0) * parcelDraft.height_mm;
   const bandCount = Math.max(1, Math.ceil(cropHeightMm / 46.9));
-  manualCuts = Array.from({ length: bandCount - 1 }, (_, index) => (index + 1) / bandCount);
-  activeManualCut = manualCuts.length ? 0 : null;
+  distributeManualBands(bandCount);
 }
 
 function updateManualReadout() {
@@ -327,6 +337,8 @@ function updateManualReadout() {
   manualCropSize.textContent = `${widthMm.toFixed(1)} × ${heightMm.toFixed(1)} MM`;
   manualBandReadout.textContent = `${String(bands.length).padStart(2, "0")} BANDES · ${bands.map((value) => value.toFixed(1)).join(" / ")} MM`;
   manualBandReadout.classList.toggle("invalid", invalid);
+  manualAddBand.disabled = bands.length >= 40;
+  manualRemoveBand.disabled = bands.length <= 1;
   parcelCompose.disabled = invalid;
   parcelCompose.title = invalid ? "Une bande dépasse 46,9 mm" : "";
 }
@@ -413,8 +425,13 @@ manualCanvas.addEventListener("pointerdown", (event) => {
   const target = manualHitTarget(point);
   if (!target) return;
   event.preventDefault();
-  manualCanvas.setPointerCapture(event.pointerId);
   if (target.type === "line") activeManualCut = target.index;
+  if (target.type === "line" && manualMoveMode === "linked") {
+    distributeManualBands();
+    drawManualEditor();
+    return;
+  }
+  manualCanvas.setPointerCapture(event.pointerId);
   manualDrag = {
     ...target,
     start: point,
@@ -445,19 +462,13 @@ manualCanvas.addEventListener("pointermove", (event) => {
   } else if (manualDrag.type === "line") {
     const cropHeight = (manualDrag.crop.y1 - manualDrag.crop.y0) * manualCanvas.height;
     const delta = (point.y - manualDrag.start.y) / cropHeight;
-    if (manualMoveMode === "linked") {
-      const low = .01 - Math.min(...manualDrag.cuts);
-      const high = .99 - Math.max(...manualDrag.cuts);
-      const safeDelta = Math.max(low, Math.min(high, delta));
-      manualCuts = manualDrag.cuts.map((value) => value + safeDelta);
-    } else {
-      const index = manualDrag.index;
-      const low = index ? manualDrag.cuts[index - 1] + .01 : .01;
-      const high = index < manualDrag.cuts.length - 1 ? manualDrag.cuts[index + 1] - .01 : .99;
-      manualCuts = [...manualDrag.cuts];
-      manualCuts[index] = Math.max(low, Math.min(high, manualDrag.cuts[index] + delta));
-    }
+    const index = manualDrag.index;
+    const low = index ? manualDrag.cuts[index - 1] + .01 : .01;
+    const high = index < manualDrag.cuts.length - 1 ? manualDrag.cuts[index + 1] - .01 : .99;
+    manualCuts = [...manualDrag.cuts];
+    manualCuts[index] = Math.max(low, Math.min(high, manualDrag.cuts[index] + delta));
   }
+  if (manualMoveMode === "linked" && manualDrag.type !== "line") distributeManualBands();
   drawManualEditor();
 });
 
@@ -484,6 +495,8 @@ manualLinked.addEventListener("click", () => {
   manualMoveMode = "linked";
   manualLinked.classList.add("active");
   manualIndependent.classList.remove("active");
+  distributeManualBands();
+  drawManualEditor();
 });
 manualIndependent.addEventListener("click", () => {
   manualMoveMode = "independent";
@@ -491,24 +504,15 @@ manualIndependent.addEventListener("click", () => {
   manualLinked.classList.remove("active");
 });
 
-document.querySelector("#manual-add-cut").addEventListener("click", () => {
-  const boundaries = [0, ...manualCuts, 1];
-  let widestIndex = 0;
-  for (let index = 1; index < boundaries.length - 1; index += 1) {
-    if (boundaries[index + 1] - boundaries[index] > boundaries[widestIndex + 1] - boundaries[widestIndex]) widestIndex = index;
-  }
-  const position = (boundaries[widestIndex] + boundaries[widestIndex + 1]) / 2;
-  manualCuts.push(position);
-  manualCuts.sort((a, b) => a - b);
-  activeManualCut = manualCuts.indexOf(position);
+manualAddBand.addEventListener("click", () => {
+  distributeManualBands(manualCuts.length + 2);
+  activeManualCut = manualCuts.length ? manualCuts.length - 1 : null;
   drawManualEditor();
 });
 
-document.querySelector("#manual-remove-cut").addEventListener("click", () => {
+manualRemoveBand.addEventListener("click", () => {
   if (!manualCuts.length) return;
-  const index = activeManualCut ?? manualCuts.length - 1;
-  manualCuts.splice(index, 1);
-  activeManualCut = manualCuts.length ? Math.min(index, manualCuts.length - 1) : null;
+  distributeManualBands(manualCuts.length);
   drawManualEditor();
 });
 
@@ -603,6 +607,7 @@ manualAuto.addEventListener("click", async () => {
     manualCrop = Object.fromEntries(Object.entries(result.crop).map(([key, value]) => [key, value / 1000]));
     manualCuts = result.cuts.map((value) => value / 1000).sort((a, b) => a - b);
     activeManualCut = manualCuts.length ? 0 : null;
+    if (manualMoveMode === "linked") distributeManualBands();
     parcelState.textContent = `Suggestion ${result.carrier} · ${Math.round(result.confidence * 100)}% · vérifiez tout`;
     drawManualEditor();
   } catch (error) {
@@ -624,7 +629,7 @@ parcelCompose.addEventListener("click", async () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         crop: normalizedCropPayload(),
-        cuts: manualCuts.map((value) => Math.round(value * 1000)),
+        cuts: manualCuts,
       }),
     });
     const result = await response.json();
