@@ -346,7 +346,7 @@ parcelForm.addEventListener("submit", async (event) => {
     return;
   }
   parcelAnalyzeButton.disabled = true;
-  parcelAnalyzeButton.querySelector("span:first-child").textContent = "Luna analyse le document…";
+  parcelAnalyzeButton.querySelector("span:first-child").textContent = "Gemma analyse le document…";
   parcelState.textContent = "Détection du transporteur, des codes et des lignes de coupe";
   try {
     const data = new FormData(parcelForm);

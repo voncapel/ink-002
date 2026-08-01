@@ -21,10 +21,12 @@ from PIL import Image, ImageDraw, ImageFont, ImageOps
 from s002_protocol import PRINT_WIDTH
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-DEFAULT_MODEL = "openai/gpt-5.6-luna-pro"
+DEFAULT_MODEL = "google/gemma-4-31b-it:free"
 RASTER_DPI = 300
 AI_MAX_SIDE = 1600
 SEPARATOR_HEIGHT = 90
+BALANCE_WEIGHT = 12.0
+MIN_BALANCED_BAND_RATIO = 0.70
 SUPPORTED_IMAGES = {".png", ".jpg", ".jpeg", ".webp"}
 ANALYSIS_CACHE_SIZE = 12
 _analysis_cache: OrderedDict[str, dict[str, Any]] = OrderedDict()
@@ -291,10 +293,11 @@ rotation is the clockwise rotation required to make the cropped label upright.
                 "schema": ANALYSIS_SCHEMA,
             },
         },
-        "provider": {"require_parameters": True},
         "reasoning": {"effort": "low", "exclude": True},
-        "max_completion_tokens": 8000,
+        "max_tokens": 4000,
     }
+    if not model.endswith(":free"):
+        payload["provider"] = {"require_parameters": True}
     request = Request(
         OPENROUTER_URL,
         data=json.dumps(payload).encode("utf-8"),
@@ -514,6 +517,38 @@ def _critical_intervals(
     return intervals
 
 
+def _local_dense_intervals(gray: Image.Image) -> list[tuple[int, int]]:
+    """Find QR/barcode-like blocks without trusting the vision model's boxes."""
+    mask = gray.point(lambda value: 255 if value < 150 else 0, mode="L")
+    bins = max(1, math.ceil(gray.width / 32))
+    columns = mask.resize((bins, gray.height), Image.Resampling.BOX)
+    pixels = columns.load()
+    dense = [any(pixels[x, y] >= 90 for x in range(bins)) for y in range(gray.height)]
+
+    # Join the tiny white gaps inside matrix codes, but discard short runs such
+    # as ordinary text baselines and horizontal table rules.
+    max_gap = 5
+    last_dense = None
+    for y, is_dense in enumerate(dense):
+        if is_dense:
+            if last_dense is not None and y - last_dense <= max_gap + 1:
+                dense[last_dense:y] = [True] * (y - last_dense)
+            last_dense = y
+
+    intervals = []
+    start = None
+    padding = 3
+    minimum_span = round(RASTER_DPI * 2 / 25.4)
+    for y, is_dense in enumerate((*dense, False)):
+        if is_dense and start is None:
+            start = y
+        elif not is_dense and start is not None:
+            if y - start >= minimum_span:
+                intervals.append((max(0, start - padding), min(gray.height, y + padding)))
+            start = None
+    return intervals
+
+
 def _row_cut_cost(gray: Image.Image, y: int, forbidden: list[tuple[int, int]]) -> float:
     if any(start <= y <= end for start, end in forbidden):
         return 1000.0
@@ -539,7 +574,11 @@ def choose_cuts(
     band_count = max(1, math.ceil(height / PRINT_WIDTH))
     if band_count == 1:
         return ()
-    forbidden = _critical_intervals(analysis, height, rotation)
+    gray = ImageOps.autocontrast(label.convert("L"))
+    forbidden = [
+        *_critical_intervals(analysis, height, rotation),
+        *_local_dense_intervals(gray),
+    ]
     suggestion_values = [
         int(value)
         for value in analysis.get("suggested_cuts_y", [])
@@ -552,8 +591,11 @@ def choose_cuts(
         # longer a valid cutting hint after the label is made upright.
         suggestion_values = []
     suggestions = sorted(round(value * height / 1000) for value in suggestion_values)
-    gray = ImageOps.autocontrast(label.convert("L"))
-    min_band = round(RASTER_DPI * 12 / 25.4)
+    ideal_band = height / band_count
+    min_band = max(
+        round(RASTER_DPI * 12 / 25.4),
+        math.floor(ideal_band * MIN_BALANCED_BAND_RATIO),
+    )
     row_costs = [_row_cut_cost(gray, y, forbidden) for y in range(height)]
     previous: dict[int, tuple[float, int | None]] = {0: (0.0, None)}
     layers: list[dict[int, tuple[float, int]]] = []
@@ -567,14 +609,20 @@ def choose_cuts(
             if index - 1 < len(suggestions)
             else round(index * height / band_count)
         )
-        positions = set(range(low, high + 1, 2))
+        positions = set(range(low, high + 1))
         positions.update({low, high, max(low, min(high, target))})
         current: dict[int, tuple[float, int]] = {}
         for y in sorted(positions):
+            if row_costs[y] >= 1000:
+                continue
             parent_low = y - PRINT_WIDTH
             parent_high = y - min_band
             eligible = (
-                (cost, parent)
+                (
+                    cost
+                    + BALANCE_WEIGHT * ((y - parent - ideal_band) / ideal_band) ** 2,
+                    parent,
+                )
                 for parent, (cost, _ancestor) in previous.items()
                 if parent_low <= parent <= parent_high
             )
@@ -590,7 +638,11 @@ def choose_cuts(
         previous = current
 
     final_candidates = (
-        (cost, position)
+        (
+            cost
+            + BALANCE_WEIGHT * ((height - position - ideal_band) / ideal_band) ** 2,
+            position,
+        )
         for position, (cost, _parent) in previous.items()
         if min_band <= height - position <= PRINT_WIDTH
     )

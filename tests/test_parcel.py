@@ -30,10 +30,12 @@ def test_suggested_safe_lines_build_four_full_scale_bands() -> None:
     assert all(
         end - start <= 554 for start, end in zip(boundaries, boundaries[1:], strict=False)
     )
-    assert all(
-        abs(actual - expected) <= 6
-        for actual, expected in zip(cuts, (552, 956, 1_344), strict=True)
-    )
+    widths = [
+        end - start for start, end in zip(boundaries, boundaries[1:], strict=False)
+    ]
+    assert min(widths) >= int(label.height / 4 * 0.70)
+    assert not any(590 <= cut <= 920 for cut in cuts)
+    assert not any(1_375 <= cut <= 1_640 for cut in cuts)
 
     roll, heights = build_roll(label, cuts)
     assert roll.size == (554, 5_470)
@@ -65,3 +67,31 @@ def test_critical_regions_follow_quarter_turn_rotation() -> None:
 
     assert start < 200
     assert end > 400
+
+
+def test_bad_model_hints_cannot_split_a_dense_code_or_make_a_tiny_band() -> None:
+    label = Image.new("RGB", (1_305, 1_706), "white")
+    draw = ImageDraw.Draw(label)
+    draw.rectangle((0, 0, 1_304, 1_705), outline="black", width=5)
+    for y in (492, 634, 956, 1_150, 1_331):
+        draw.line((0, y, 1_304, y), fill="black", width=5)
+    # Dense matrix-code stand-in. The deliberately bad model hint crosses it.
+    for y in range(590, 930, 12):
+        for x in range(880, 1_220, 12):
+            if (x // 12 + y // 12) % 3:
+                draw.rectangle((x, y, x + 7, y + 7), fill="black")
+    analysis = {
+        "suggested_cuts_y": [288, 372, 674],
+        "critical_regions": [],
+    }
+
+    cuts = choose_cuts(label, analysis)
+    boundaries = (0, *cuts, label.height)
+    widths = [
+        end - start for start, end in zip(boundaries, boundaries[1:], strict=False)
+    ]
+
+    assert len(cuts) == 3
+    assert not any(580 <= cut <= 940 for cut in cuts)
+    assert min(widths) >= int(label.height / 4 * 0.70)
+    assert max(widths) <= 554

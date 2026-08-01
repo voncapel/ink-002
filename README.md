@@ -49,7 +49,7 @@ python3 -m venv .venv
 Open <http://127.0.0.1:8092>.
 
 To enable the **COLIS** workspace, copy `.env.example` to `.env` and add an
-OpenRouter key. The configured default model is `openai/gpt-5.6-luna-pro`.
+OpenRouter key. The configured default model is `google/gemma-4-31b-it:free`.
 `.env` is ignored by Git and should remain mode `600` on shared machines.
 
 `S002_TRANSPORT=auto` selects the native IOBluetooth helper on macOS and BlueZ
@@ -133,7 +133,7 @@ additional layer. See [SECURITY.md](SECURITY.md).
 | `S002_WEB_USER` | empty | Optional HTTP Basic username |
 | `S002_WEB_PASSWORD` | empty | Enables HTTP Basic authentication when non-empty |
 | `OPENROUTER_API_KEY` | empty | Enables vision-assisted parcel-label detection |
-| `OPENROUTER_MODEL` | `openai/gpt-5.6-luna-pro` | OpenRouter vision model slug |
+| `OPENROUTER_MODEL` | `google/gemma-4-31b-it:free` | OpenRouter vision model slug |
 | `PORT` | `8092` | Development-server port |
 
 ## Tests
