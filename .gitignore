@@ -1,0 +1,33 @@
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Runtime data and generated binaries
+data/
+jobs/
+bin/
+*.log
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+deploy/cloudflared-ink-002.yml
+deploy/cloudflared.local.yml
+*.credentials.json
+
+# Editors and operating systems
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Vendor/research artifacts are intentionally not part of this clean-room repo
+*.apk
+*.so
+snaptag_decomp/

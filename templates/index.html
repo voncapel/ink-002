@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#101114">
+  <title>INK 002</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="INK 002 — accueil">
+      <span class="brand-mark" aria-hidden="true"></span>
+      <span>INK <b>002</b></span>
+    </a>
+    <div class="connection" id="connection" data-idle-label="{{ idle_label }}">
+      <span class="status-square" aria-hidden="true"></span>
+      <span>S002 · vérification</span>
+    </div>
+  </header>
+
+  <nav class="main-tabs" aria-label="Sections">
+    <button class="main-tab active" type="button" data-view="print" aria-selected="true">
+      <span class="tab-index">01</span>
+      <strong>Imprimer</strong>
+    </button>
+    <button class="main-tab mtg-tab" type="button" data-view="mtg" aria-selected="false">
+      <span class="tab-index">02</span>
+      <strong>MTG</strong>
+      <small>next</small>
+    </button>
+  </nav>
+
+  <main>
+    <section class="view active" id="print-view" aria-labelledby="print-title">
+      <div class="view-head">
+        <div>
+          <p class="kicker">S002 / 554 DOTS</p>
+          <h1 id="print-title">Impression</h1>
+        </div>
+        <p class="view-note">Texte, image ou document.<br>Directement sur papier thermique.</p>
+      </div>
+
+      <div class="workbench">
+        <form id="print-form" class="composer">
+          <div class="source-tabs" role="tablist" aria-label="Type de contenu">
+            <button class="source-tab active" type="button" data-mode="text" role="tab" aria-selected="true">Texte</button>
+            <button class="source-tab" type="button" data-mode="file" role="tab" aria-selected="false">Image / fichier</button>
+          </div>
+
+          <div class="input-panel" id="text-panel">
+            <label class="sr-only" for="text">Texte à imprimer</label>
+            <textarea id="text" name="text" rows="8" placeholder="Écrivez quelque chose…" spellcheck="true"></textarea>
+            <span class="counter"><b id="char-count">0</b> caractères</span>
+          </div>
+
+          <div class="input-panel hidden" id="file-panel">
+            <label class="dropzone" for="file">
+              <input id="file" name="file" type="file" accept="image/*,.pdf,.txt">
+              <span class="drop-icon" aria-hidden="true">＋</span>
+              <span>
+                <strong id="file-label">Choisir une image</strong>
+                <small>ou la déposer ici · PNG, JPG, WEBP, PDF, TXT</small>
+              </span>
+            </label>
+
+            <section class="image-editor hidden" id="image-editor" aria-label="Éditeur d’image">
+              <div class="preview-head">
+                <div>
+                  <span class="tab-index">APERÇU</span>
+                  <strong>Sortie thermique</strong>
+                </div>
+                <span id="preview-size">554 DOTS</span>
+              </div>
+              <div class="preview-stage">
+                <canvas id="image-preview" width="554" height="360" aria-label="Aperçu noir et blanc retouché"></canvas>
+              </div>
+
+              <div class="editor-controls">
+                <fieldset class="dither-fieldset">
+                  <legend>Trame</legend>
+                  <div class="dither-grid">
+                    <label class="dither-card">
+                      <input type="radio" name="dither" value="threshold">
+                      <span><b>Seuil</b><small>Franc</small></span>
+                    </label>
+                    <label class="dither-card selected">
+                      <input type="radio" name="dither" value="floyd" checked>
+                      <span><b>Floyd</b><small>Photo</small></span>
+                    </label>
+                    <label class="dither-card">
+                      <input type="radio" name="dither" value="atkinson">
+                      <span><b>Atkinson</b><small>Doux</small></span>
+                    </label>
+                    <label class="dither-card">
+                      <input type="radio" name="dither" value="bayer4">
+                      <span><b>Bayer 4</b><small>Trame</small></span>
+                    </label>
+                    <label class="dither-card">
+                      <input type="radio" name="dither" value="bayer8">
+                      <span><b>Bayer 8</b><small>Fin</small></span>
+                    </label>
+                  </div>
+                </fieldset>
+
+                <div class="adjustments">
+                  <label class="range-control">
+                    <span><b>Contraste</b><output for="contrast">100</output></span>
+                    <input id="contrast" name="contrast" type="range" min="40" max="200" value="100" step="1">
+                  </label>
+                  <label class="range-control">
+                    <span><b>Clarté</b><output for="brightness">100</output></span>
+                    <input id="brightness" name="brightness" type="range" min="40" max="160" value="100" step="1">
+                  </label>
+                  <label class="range-control">
+                    <span><b>Netteté</b><output for="sharpness">100</output></span>
+                    <input id="sharpness" name="sharpness" type="range" min="0" max="250" value="100" step="1">
+                  </label>
+                </div>
+              </div>
+            </section>
+          </div>
+
+          <div class="controls">
+            <label>
+              <span>Densité</span>
+              <select name="density">
+                <option value="7">Claire · 07</option>
+                <option value="12" selected>Normale · 12</option>
+                <option value="15">Foncée · 15</option>
+              </select>
+            </label>
+            <label class="text-option">
+              <span>Taille</span>
+              <select name="font_size">
+                <option value="24">Petite · 24</option>
+                <option value="32" selected>Normale · 32</option>
+                <option value="44">Grande · 44</option>
+                <option value="60">Affiche · 60</option>
+              </select>
+            </label>
+            <label class="text-option">
+              <span>Alignement</span>
+              <select name="align">
+                <option value="left">Gauche</option>
+                <option value="center">Centre</option>
+                <option value="right">Droite</option>
+              </select>
+            </label>
+            <input type="hidden" name="threshold" value="128">
+          </div>
+
+          <button class="print-button" type="submit">
+            <span class="print-glyph" aria-hidden="true">▰</span>
+            <span class="button-label">Imprimer</span>
+            <span class="button-arrow" aria-hidden="true">→</span>
+          </button>
+          <p class="form-error" id="form-error" role="alert"></p>
+          <p class="print-state" id="print-state" aria-live="polite"></p>
+        </form>
+      </div>
+    </section>
+
+    <section class="view" id="mtg-view" aria-labelledby="mtg-title" hidden>
+      <div class="mtg-soon">
+        <span class="mtg-symbol" aria-hidden="true">M</span>
+        <p class="kicker">PROCHAINE ÉTAPE</p>
+        <h1 id="mtg-title">MTG proxies</h1>
+        <p>Une carte, un format, une impression.<br>Le deck builder arrive ensuite.</p>
+        <span class="todo-label">TODO / NEXT</span>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <span>{% if portable %}MODE PORTABLE · MAC LOCAL{% else %}RELAIS PRIVÉ · HOME SERVER{% endif %}</span>
+    <span>{{ transport_label }}</span>
+  </footer>
+
+  <script src="{{ url_for('static', filename='app.js') }}" defer></script>
+</body>
+</html>

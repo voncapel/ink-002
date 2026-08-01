@@ -1,0 +1,286 @@
+"""Small, single-printer web queue for the Snap & Tag S002."""
+
+from __future__ import annotations
+
+from collections import OrderedDict
+from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
+import hmac
+import os
+from pathlib import Path
+from queue import Queue
+import threading
+import uuid
+
+from flask import Flask, jsonify, render_template, request, send_file
+from PIL import Image
+
+from rendering import DITHER_PRESETS, render_text, render_upload
+from s002_protocol import encode_print_job, resolve_transport, send_print_job
+
+
+BASE_DIR = Path(__file__).resolve().parent
+DATA_DIR = Path(os.environ.get("S002_DATA_DIR", BASE_DIR / "data"))
+JOBS_DIR = DATA_DIR / "jobs"
+PRINTER_MAC = os.environ.get("S002_MAC", "06:03:86:00:97:AB")
+PRINTER_CHANNEL = int(os.environ.get("S002_CHANNEL", "1"))
+PRINTER_TRANSPORT = resolve_transport(os.environ.get("S002_TRANSPORT", "auto"))
+PRINTER_PORT = os.environ.get("S002_PORT", "/dev/cu.S002")
+PRINTER_BAUD = int(os.environ.get("S002_BAUD", "115200"))
+SERIAL_CHUNK_SIZE = int(os.environ.get("S002_SERIAL_CHUNK_SIZE", "64"))
+SERIAL_CHUNK_DELAY = float(os.environ.get("S002_SERIAL_CHUNK_DELAY", "0.05"))
+RFCOMM_CHUNK_SIZE = int(os.environ.get("S002_RFCOMM_CHUNK_SIZE", "0"))
+RFCOMM_CHUNK_DELAY = float(os.environ.get("S002_RFCOMM_CHUNK_DELAY", "0"))
+BASIC_USER = os.environ.get("S002_WEB_USER", "")
+BASIC_PASSWORD = os.environ.get("S002_WEB_PASSWORD", "")
+MAX_HISTORY = 40
+
+JOBS_DIR.mkdir(parents=True, exist_ok=True)
+
+app = Flask(__name__)
+app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024
+
+
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+@dataclass
+class Job:
+    id: str
+    label: str
+    source: str
+    density: int
+    threshold: int
+    dither: str | None = None
+    status: str = "queued"
+    created_at: str = ""
+    started_at: str | None = None
+    completed_at: str | None = None
+    sent_bytes: int | None = None
+    reply_bytes: int | None = None
+    elapsed_seconds: float | None = None
+    error: str | None = None
+
+    def public(self) -> dict:
+        result = asdict(self)
+        result["preview_url"] = f"/api/jobs/{self.id}/preview"
+        return result
+
+
+jobs: OrderedDict[str, Job] = OrderedDict()
+jobs_lock = threading.Lock()
+print_queue: Queue[str] = Queue()
+
+
+def save_job(
+    image: Image.Image,
+    *,
+    label: str,
+    source: str,
+    density: int,
+    threshold: int,
+    dither: str | None = None,
+) -> Job:
+    job_id = uuid.uuid4().hex[:12]
+    image.save(JOBS_DIR / f"{job_id}.png", format="PNG", optimize=True)
+    job = Job(
+        id=job_id,
+        label=label[:80],
+        source=source,
+        density=density,
+        threshold=threshold,
+        dither=dither,
+        created_at=now_iso(),
+    )
+    with jobs_lock:
+        jobs[job_id] = job
+        while len(jobs) > MAX_HISTORY:
+            old_id, _ = jobs.popitem(last=False)
+            (JOBS_DIR / f"{old_id}.png").unlink(missing_ok=True)
+    print_queue.put(job_id)
+    return job
+
+
+def print_worker() -> None:
+    while True:
+        job_id = print_queue.get()
+        try:
+            with jobs_lock:
+                job = jobs.get(job_id)
+                if job is None:
+                    continue
+                job.status = "printing"
+                job.started_at = now_iso()
+            with Image.open(JOBS_DIR / f"{job_id}.png") as image:
+                payload = encode_print_job(
+                    image,
+                    density=job.density,
+                    threshold=job.threshold,
+                )
+            result = send_print_job(
+                payload,
+                mac=PRINTER_MAC,
+                channel=PRINTER_CHANNEL,
+                transport=PRINTER_TRANSPORT,
+                port=PRINTER_PORT,
+                baud=PRINTER_BAUD,
+                chunk_size=(RFCOMM_CHUNK_SIZE if PRINTER_TRANSPORT == "macos_rfcomm" else SERIAL_CHUNK_SIZE),
+                chunk_delay=(RFCOMM_CHUNK_DELAY if PRINTER_TRANSPORT == "macos_rfcomm" else SERIAL_CHUNK_DELAY),
+            )
+            with jobs_lock:
+                job.status = "done"
+                job.completed_at = now_iso()
+                job.sent_bytes = result.sent_bytes
+                job.reply_bytes = len(result.reply)
+                job.elapsed_seconds = round(result.elapsed_seconds, 2)
+        except Exception as exc:
+            with jobs_lock:
+                job = jobs.get(job_id)
+                if job is not None:
+                    job.status = "failed"
+                    job.completed_at = now_iso()
+                    job.error = f"{type(exc).__name__}: {exc}"
+            app.logger.exception("S002 print job %s failed", job_id)
+        finally:
+            print_queue.task_done()
+
+
+threading.Thread(target=print_worker, name="s002-print-worker", daemon=True).start()
+
+
+@app.before_request
+def require_basic_auth():
+    """Optional defense-in-depth in addition to Cloudflare Access."""
+    if not BASIC_PASSWORD:
+        return None
+    auth = request.authorization
+    valid = (
+        auth is not None
+        and hmac.compare_digest(auth.username or "", BASIC_USER)
+        and hmac.compare_digest(auth.password or "", BASIC_PASSWORD)
+    )
+    if valid:
+        return None
+    return ("Authentication required", 401, {"WWW-Authenticate": 'Basic realm="Ink 002"'})
+
+
+@app.get("/")
+def index():
+    portable = PRINTER_TRANSPORT in {"macos_rfcomm", "macos_serial"}
+    return render_template(
+        "index.html",
+        printer_mac=PRINTER_MAC,
+        portable=portable,
+        idle_label="S002 · Mac ready" if portable else "S002 · relay ready",
+        transport_label="LOCAL MAC · RFCOMM 01" if portable else "HOME RELAY · RFCOMM 01",
+    )
+
+
+@app.get("/api/health")
+def health():
+    with jobs_lock:
+        active = sum(job.status in {"queued", "printing"} for job in jobs.values())
+    return jsonify(
+        {
+            "ok": True,
+            "printer": "S002",
+            "mac": PRINTER_MAC,
+            "transport": PRINTER_TRANSPORT,
+            "port": PRINTER_PORT if PRINTER_TRANSPORT == "macos_serial" else None,
+            "active_jobs": active,
+        }
+    )
+
+
+@app.get("/api/jobs")
+def list_jobs():
+    with jobs_lock:
+        recent = [job.public() for job in reversed(jobs.values())]
+    return jsonify({"jobs": recent})
+
+
+@app.get("/api/jobs/<job_id>")
+def get_job(job_id: str):
+    with jobs_lock:
+        job = jobs.get(job_id)
+        if job is None:
+            return jsonify({"error": "job not found"}), 404
+        return jsonify(job.public())
+
+
+@app.get("/api/jobs/<job_id>/preview")
+def preview(job_id: str):
+    with jobs_lock:
+        if job_id not in jobs:
+            return jsonify({"error": "job not found"}), 404
+    path = JOBS_DIR / f"{job_id}.png"
+    if not path.is_file():
+        return jsonify({"error": "preview not found"}), 404
+    return send_file(path, mimetype="image/png", max_age=60)
+
+
+@app.post("/api/jobs")
+def create_job():
+    try:
+        density = int(request.form.get("density", "12"))
+        threshold = int(request.form.get("threshold", "85"))
+        font_size = int(request.form.get("font_size", "32"))
+        align = request.form.get("align", "left")
+        if density not in {7, 12, 15}:
+            raise ValueError("density must be light, medium, or dark")
+        if not 1 <= threshold <= 254:
+            raise ValueError("threshold must be between 1 and 254")
+
+        upload = request.files.get("file")
+        text = request.form.get("text", "")
+        dither = request.form.get("dither", "floyd")
+        contrast = int(request.form.get("contrast", "100"))
+        brightness = int(request.form.get("brightness", "100"))
+        sharpness = int(request.form.get("sharpness", "100"))
+        if upload and upload.filename:
+            if dither not in DITHER_PRESETS:
+                raise ValueError("unknown dithering preset")
+            if not 40 <= contrast <= 200:
+                raise ValueError("contrast must be between 40 and 200")
+            if not 40 <= brightness <= 160:
+                raise ValueError("brightness must be between 40 and 160")
+            if not 0 <= sharpness <= 250:
+                raise ValueError("sharpness must be between 0 and 250")
+            image = render_upload(
+                upload.filename,
+                upload.stream,
+                font_size=font_size,
+                dither=dither,
+                contrast=contrast,
+                brightness=brightness,
+                sharpness=sharpness,
+            )
+            label = upload.filename
+            source = f"image · {dither}"
+        else:
+            image = render_text(text, font_size=font_size, align=align)
+            first_line = next((line.strip() for line in text.splitlines() if line.strip()), "Text")
+            label = first_line[:60]
+            source = "text"
+
+        job = save_job(
+            image,
+            label=label,
+            source=source,
+            density=density,
+            threshold=threshold,
+            dither=dither if upload and upload.filename else None,
+        )
+        return jsonify(job.public()), 202
+    except (RuntimeError, ValueError) as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+@app.errorhandler(413)
+def too_large(_error):
+    return jsonify({"error": "uploads are limited to 16 MB"}), 413
+
+
+if __name__ == "__main__":
+    app.run(host="127.0.0.1", port=int(os.environ.get("PORT", "8092")), debug=False)

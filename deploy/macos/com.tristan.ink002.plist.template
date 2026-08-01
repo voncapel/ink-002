@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.tristan.ink002</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__VENV_DIR__/bin/gunicorn</string>
+    <string>--chdir</string>
+    <string>__APP_DIR__</string>
+    <string>--workers</string>
+    <string>1</string>
+    <string>--threads</string>
+    <string>4</string>
+    <string>--bind</string>
+    <string>127.0.0.1:8092</string>
+    <string>app:app</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>S002_TRANSPORT</key>
+    <string>macos_rfcomm</string>
+    <key>S002_MAC</key>
+    <string>06:03:86:00:97:AB</string>
+    <key>S002_PORT</key>
+    <string>/dev/cu.S002</string>
+    <key>S002_BAUD</key>
+    <string>115200</string>
+    <key>S002_DATA_DIR</key>
+    <string>__DATA_DIR__</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ProcessType</key>
+  <string>Interactive</string>
+  <key>StandardOutPath</key>
+  <string>__LOG_DIR__/ink002.log</string>
+  <key>StandardErrorPath</key>
+  <string>__LOG_DIR__/ink002.error.log</string>
+</dict>
+</plist>
