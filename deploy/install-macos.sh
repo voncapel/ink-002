@@ -17,10 +17,12 @@ fi
 
 mkdir -p "$APP_DIR" "$DATA_DIR" "$LOG_DIR" "$(dirname "$PLIST")"
 rsync -a \
+  --exclude '.git' \
   --exclude '.venv' \
   --exclude '__pycache__' \
   --exclude '.pytest_cache' \
   --exclude 'data' \
+  --exclude 'tmp' \
   "$SOURCE_DIR/" "$APP_DIR/"
 
 mkdir -p "$APP_DIR/bin"

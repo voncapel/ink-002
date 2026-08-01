@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import io
 import os
 from pathlib import Path
 from typing import BinaryIO
@@ -10,7 +9,6 @@ from typing import BinaryIO
 from PIL import Image, ImageDraw, ImageEnhance, ImageFont, ImageOps
 
 from s002_protocol import PRINT_WIDTH
-
 
 MAX_HEIGHT = 30_000
 DEFAULT_MARGIN = 18
@@ -32,7 +30,12 @@ def find_font() -> str:
     raise RuntimeError("no Unicode font found; install fonts-dejavu-core or set S002_FONT_PATH")
 
 
-def _split_long_word(draw: ImageDraw.ImageDraw, word: str, font: ImageFont.FreeTypeFont, width: int) -> list[str]:
+def _split_long_word(
+    draw: ImageDraw.ImageDraw,
+    word: str,
+    font: ImageFont.FreeTypeFont,
+    width: int,
+) -> list[str]:
     pieces: list[str] = []
     current = ""
     for character in word:
@@ -208,12 +211,16 @@ def _fit_image(
     background = Image.new("RGBA", frame.size, "white")
     background.alpha_composite(frame)
     gray = ImageOps.autocontrast(background.convert("L"))
-    content_width = PRINT_WIDTH - DEFAULT_MARGIN * 2
+    # A 554-dot image is already a complete printer-width raster. Preserve it
+    # byte-for-byte geometrically: no margins and no page-height fitting.
+    print_ready = gray.width == PRINT_WIDTH
+    margin = 0 if print_ready else DEFAULT_MARGIN
+    content_width = PRINT_WIDTH if print_ready else PRINT_WIDTH - DEFAULT_MARGIN * 2
     scale = min(1.0, content_width / gray.width)
     target_size = (max(1, round(gray.width * scale)), max(1, round(gray.height * scale)))
     if target_size != gray.size:
         gray = gray.resize(target_size, Image.Resampling.LANCZOS)
-    if gray.height + DEFAULT_MARGIN * 2 > MAX_HEIGHT:
+    if gray.height + margin * 2 > MAX_HEIGHT:
         raise ValueError("image is too tall for one print job")
     gray = adjust_image(
         gray,
@@ -222,8 +229,8 @@ def _fit_image(
         sharpness=sharpness,
     )
     gray = apply_dither(gray, dither)
-    canvas = Image.new("L", (PRINT_WIDTH, gray.height + DEFAULT_MARGIN * 2), 255)
-    canvas.paste(gray, ((PRINT_WIDTH - gray.width) // 2, DEFAULT_MARGIN))
+    canvas = Image.new("L", (PRINT_WIDTH, gray.height + margin * 2), 255)
+    canvas.paste(gray, ((PRINT_WIDTH - gray.width) // 2, margin))
     return canvas
 
 

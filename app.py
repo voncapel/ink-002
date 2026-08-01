@@ -2,26 +2,29 @@
 
 from __future__ import annotations
 
-from collections import OrderedDict
-from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
 import hmac
 import os
-from pathlib import Path
-from queue import Queue
 import threading
 import uuid
+from collections import OrderedDict
+from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
+from pathlib import Path
+from queue import Queue
 
+from dotenv import load_dotenv
 from flask import Flask, jsonify, render_template, request, send_file
 from PIL import Image
 
+from parcel import ParcelError, ParcelOutput, analyze_parcel
 from rendering import DITHER_PRESETS, render_text, render_upload
 from s002_protocol import encode_print_job, resolve_transport, send_print_job
 
-
 BASE_DIR = Path(__file__).resolve().parent
+load_dotenv(BASE_DIR / ".env")
 DATA_DIR = Path(os.environ.get("S002_DATA_DIR", BASE_DIR / "data"))
 JOBS_DIR = DATA_DIR / "jobs"
+PARCELS_DIR = DATA_DIR / "parcels"
 PRINTER_MAC = os.environ.get("S002_MAC", "06:03:86:00:97:AB")
 PRINTER_CHANNEL = int(os.environ.get("S002_CHANNEL", "1"))
 PRINTER_TRANSPORT = resolve_transport(os.environ.get("S002_TRANSPORT", "auto"))
@@ -34,15 +37,29 @@ RFCOMM_CHUNK_DELAY = float(os.environ.get("S002_RFCOMM_CHUNK_DELAY", "0"))
 BASIC_USER = os.environ.get("S002_WEB_USER", "")
 BASIC_PASSWORD = os.environ.get("S002_WEB_PASSWORD", "")
 MAX_HISTORY = 40
+MAX_PARCELS = 8
 
 JOBS_DIR.mkdir(parents=True, exist_ok=True)
+PARCELS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def clear_transient_files() -> None:
+    """Remove private previews that cannot be recovered after a process restart."""
+    for path in JOBS_DIR.glob("*.png"):
+        path.unlink(missing_ok=True)
+    for pattern in ("*-preview.png", "*-roll.png"):
+        for path in PARCELS_DIR.glob(pattern):
+            path.unlink(missing_ok=True)
+
+
+clear_transient_files()
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024
 
 
 def now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(UTC).isoformat(timespec="seconds")
 
 
 @dataclass
@@ -71,6 +88,59 @@ class Job:
 jobs: OrderedDict[str, Job] = OrderedDict()
 jobs_lock = threading.Lock()
 print_queue: Queue[str] = Queue()
+
+
+@dataclass
+class ParcelSession:
+    id: str
+    carrier: str
+    confidence: float
+    document_side: str
+    notes: str
+    label_width_mm: float
+    label_height_mm: float
+    band_heights_mm: tuple[float, ...]
+    roll_height: int
+    model: str
+    created_at: str
+
+    def public(self) -> dict:
+        return {
+            **asdict(self),
+            "preview_url": f"/api/parcels/{self.id}/preview",
+            "roll_url": f"/api/parcels/{self.id}/roll",
+            "band_count": len(self.band_heights_mm),
+        }
+
+
+parcel_sessions: OrderedDict[str, ParcelSession] = OrderedDict()
+parcel_lock = threading.Lock()
+
+
+def save_parcel(output: ParcelOutput) -> ParcelSession:
+    parcel_id = uuid.uuid4().hex[:12]
+    output.preview.save(PARCELS_DIR / f"{parcel_id}-preview.png", format="PNG", optimize=True)
+    output.roll.save(PARCELS_DIR / f"{parcel_id}-roll.png", format="PNG", optimize=True)
+    session = ParcelSession(
+        id=parcel_id,
+        carrier=output.carrier[:80],
+        confidence=round(output.confidence, 3),
+        document_side=output.document_side,
+        notes=output.notes[:240],
+        label_width_mm=round(output.label_width_mm, 1),
+        label_height_mm=round(output.label_height_mm, 1),
+        band_heights_mm=tuple(round(value, 1) for value in output.band_heights_mm),
+        roll_height=output.roll.height,
+        model=output.model,
+        created_at=now_iso(),
+    )
+    with parcel_lock:
+        parcel_sessions[parcel_id] = session
+        while len(parcel_sessions) > MAX_PARCELS:
+            old_id, _ = parcel_sessions.popitem(last=False)
+            (PARCELS_DIR / f"{old_id}-preview.png").unlink(missing_ok=True)
+            (PARCELS_DIR / f"{old_id}-roll.png").unlink(missing_ok=True)
+    return session
 
 
 def save_job(
@@ -126,7 +196,11 @@ def print_worker() -> None:
                 port=PRINTER_PORT,
                 baud=PRINTER_BAUD,
                 chunk_size=(RFCOMM_CHUNK_SIZE if PRINTER_TRANSPORT == "macos_rfcomm" else SERIAL_CHUNK_SIZE),
-                chunk_delay=(RFCOMM_CHUNK_DELAY if PRINTER_TRANSPORT == "macos_rfcomm" else SERIAL_CHUNK_DELAY),
+                chunk_delay=(
+                    RFCOMM_CHUNK_DELAY
+                    if PRINTER_TRANSPORT == "macos_rfcomm"
+                    else SERIAL_CHUNK_DELAY
+                ),
             )
             with jobs_lock:
                 job.status = "done"
@@ -189,8 +263,76 @@ def health():
             "transport": PRINTER_TRANSPORT,
             "port": PRINTER_PORT if PRINTER_TRANSPORT == "macos_serial" else None,
             "active_jobs": active,
+            "parcel_ai_configured": bool(os.environ.get("OPENROUTER_API_KEY", "").strip()),
         }
     )
+
+
+@app.post("/api/parcels/analyze")
+def analyze_parcel_document():
+    try:
+        upload = request.files.get("file")
+        if not upload or not upload.filename:
+            raise ParcelError("Choisissez un bordereau PDF ou une image")
+        content = upload.read()
+        if not content:
+            raise ParcelError("Le fichier envoyé est vide")
+        output = analyze_parcel(upload.filename, content)
+        return jsonify(save_parcel(output).public()), 201
+    except (ParcelError, RuntimeError, ValueError) as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+def get_parcel_session(parcel_id: str) -> ParcelSession | None:
+    with parcel_lock:
+        return parcel_sessions.get(parcel_id)
+
+
+@app.get("/api/parcels/<parcel_id>/preview")
+def parcel_preview(parcel_id: str):
+    if get_parcel_session(parcel_id) is None:
+        return jsonify({"error": "parcel analysis not found"}), 404
+    path = PARCELS_DIR / f"{parcel_id}-preview.png"
+    if not path.is_file():
+        return jsonify({"error": "parcel preview not found"}), 404
+    response = send_file(path, mimetype="image/png", max_age=0)
+    response.headers["Cache-Control"] = "private, no-store"
+    return response
+
+
+@app.get("/api/parcels/<parcel_id>/roll")
+def parcel_roll(parcel_id: str):
+    if get_parcel_session(parcel_id) is None:
+        return jsonify({"error": "parcel analysis not found"}), 404
+    path = PARCELS_DIR / f"{parcel_id}-roll.png"
+    if not path.is_file():
+        return jsonify({"error": "parcel roll not found"}), 404
+    response = send_file(path, mimetype="image/png", max_age=0)
+    response.headers["Cache-Control"] = "private, no-store"
+    return response
+
+
+@app.post("/api/parcels/<parcel_id>/print")
+def print_parcel(parcel_id: str):
+    try:
+        session = get_parcel_session(parcel_id)
+        if session is None:
+            return jsonify({"error": "parcel analysis not found"}), 404
+        density = int(request.form.get("density", "12"))
+        if density not in {7, 12, 15}:
+            raise ValueError("density must be light, medium, or dark")
+        with Image.open(PARCELS_DIR / f"{parcel_id}-roll.png") as source:
+            image = source.convert("L")
+        job = save_job(
+            image,
+            label=f"{session.carrier} · {len(session.band_heights_mm)} bandes",
+            source="colis · mosaïque",
+            density=density,
+            threshold=128,
+        )
+        return jsonify(job.public()), 202
+    except (RuntimeError, ValueError) as exc:
+        return jsonify({"error": str(exc)}), 400
 
 
 @app.get("/api/jobs")

@@ -13,6 +13,8 @@
     <string>1</string>
     <string>--threads</string>
     <string>4</string>
+    <string>--timeout</string>
+    <string>180</string>
     <string>--bind</string>
     <string>127.0.0.1:8092</string>
     <string>app:app</string>

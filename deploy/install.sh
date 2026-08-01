@@ -13,10 +13,18 @@ if [[ -z ${SOURCE_DIR} || ! -f ${SOURCE_DIR}/app.py ]]; then
 fi
 
 apt-get update
-apt-get install -y bluez python3 python3-venv fonts-dejavu-core
+apt-get install -y bluez python3 python3-venv fonts-dejavu-core rsync
 
 install -d -o tristan -g tristan /opt/s002-web /var/lib/s002-web/jobs
-cp -R "${SOURCE_DIR}/." /opt/s002-web/
+rsync -a --delete \
+  --exclude '.env' \
+  --exclude '.git' \
+  --exclude '.venv' \
+  --exclude '__pycache__' \
+  --exclude '.pytest_cache' \
+  --exclude 'data' \
+  --exclude 'tmp' \
+  "${SOURCE_DIR}/" /opt/s002-web/
 chown -R tristan:tristan /opt/s002-web /var/lib/s002-web
 
 python3 -m venv /opt/s002-web/.venv

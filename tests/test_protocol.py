@@ -4,7 +4,6 @@ from PIL import Image
 
 from s002_protocol import encode_print_job, raster_bytes
 
-
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
 

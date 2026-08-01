@@ -21,6 +21,9 @@ SDK, native Android library, or any extracted proprietary source.
 - Native macOS IOBluetooth helper; no Android device or home server required.
 - Native Linux/BlueZ RFCOMM transport for a permanent home relay.
 - Optional HTTP Basic authentication for remotely exposed installations.
+- AI-assisted parcel-label isolation with full-scale strip tiling: a vision
+  model finds the useful carrier label and protected regions, then a local
+  algorithm chooses safe cuts and produces an exact 554-dot roll.
 
 The **MTG** workspace is intentionally a placeholder for a future proxy-printing
 workflow.
@@ -44,6 +47,10 @@ python3 -m venv .venv
 ```
 
 Open <http://127.0.0.1:8092>.
+
+To enable the **COLIS** workspace, copy `.env.example` to `.env` and add an
+OpenRouter key. The configured default model is `openai/gpt-5.6-luna-pro`.
+`.env` is ignored by Git and should remain mode `600` on shared machines.
 
 `S002_TRANSPORT=auto` selects the native IOBluetooth helper on macOS and BlueZ
 RFCOMM on Linux. The macOS helper is compiled by the installer; running the Flask
@@ -125,6 +132,8 @@ additional layer. See [SECURITY.md](SECURITY.md).
 | `S002_FONT_PATH` | auto-detected | Unicode TrueType font |
 | `S002_WEB_USER` | empty | Optional HTTP Basic username |
 | `S002_WEB_PASSWORD` | empty | Enables HTTP Basic authentication when non-empty |
+| `OPENROUTER_API_KEY` | empty | Enables vision-assisted parcel-label detection |
+| `OPENROUTER_MODEL` | `openai/gpt-5.6-luna-pro` | OpenRouter vision model slug |
 | `PORT` | `8092` | Development-server port |
 
 ## Tests
@@ -143,6 +152,7 @@ command from regressions. Tests never connect to or print from the S002.
 
 ```text
 app.py                  Flask app, queue, API, and worker
+parcel.py               vision analysis, local validation, and strip tiling
 rendering.py            text/document rendering and image processing
 s002_protocol.py        CUS encoder and platform transports
 native/macos_rfcomm.m   native macOS RFCOMM helper
@@ -161,6 +171,9 @@ For implementation details, read [Architecture](docs/architecture.md) and
 - One S002 printer per process.
 - Print history is transient and intentionally hidden from the interface.
 - PDF jobs are limited to 20 pages and all jobs to 30,000 raster rows.
+- Parcel analysis currently uses only the first PDF page. A downsampled PNG of
+  that page is sent to OpenRouter; crop snapping, cut validation, rasterization,
+  and print-roll generation remain local.
 - The native macOS helper uses the deprecated IOBluetooth framework because the
   printer exposes Bluetooth Classic SPP rather than BLE.
 - The MTG proxy composer is not implemented yet.

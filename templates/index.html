@@ -24,8 +24,13 @@
       <span class="tab-index">01</span>
       <strong>Imprimer</strong>
     </button>
-    <button class="main-tab mtg-tab" type="button" data-view="mtg" aria-selected="false">
+    <button class="main-tab parcel-tab" type="button" data-view="parcel" aria-selected="false">
       <span class="tab-index">02</span>
+      <strong>Colis</strong>
+      <small>vision</small>
+    </button>
+    <button class="main-tab mtg-tab" type="button" data-view="mtg" aria-selected="false">
+      <span class="tab-index">03</span>
       <strong>MTG</strong>
       <small>next</small>
     </button>
@@ -158,6 +163,92 @@
           <p class="form-error" id="form-error" role="alert"></p>
           <p class="print-state" id="print-state" aria-live="polite"></p>
         </form>
+      </div>
+    </section>
+
+    <section class="view" id="parcel-view" aria-labelledby="parcel-title" hidden>
+      <div class="view-head">
+        <div>
+          <p class="kicker parcel-kicker">VISION / ÉCHELLE 1:1</p>
+          <h1 id="parcel-title">Étiquette colis</h1>
+        </div>
+        <p class="view-note">Détection du bordereau utile.<br>Découpe en bandes pleine échelle.</p>
+      </div>
+
+      <div class="parcel-workbench">
+        <form id="parcel-form" class="parcel-intake">
+          <div class="parcel-step-head">
+            <span class="parcel-step-number">01</span>
+            <div>
+              <strong>Déposer le bordereau</strong>
+              <small>PDF ou image · première page analysée</small>
+            </div>
+          </div>
+          <label class="parcel-dropzone" for="parcel-file">
+            <input id="parcel-file" name="file" type="file" accept="application/pdf,image/png,image/jpeg,image/webp">
+            <span class="parcel-scan-glyph" aria-hidden="true"></span>
+            <span>
+              <strong id="parcel-file-label">Choisir un bordereau</strong>
+              <small>ou le déposer ici</small>
+            </span>
+          </label>
+          <div class="parcel-ai-note">
+            <span>LUNA / PRO</span>
+            <p>L’image du document est envoyée à OpenRouter pour localiser l’étiquette et les codes. Le découpage final reste local.</p>
+          </div>
+          <button class="parcel-analyze-button" type="submit">
+            <span>Analyser la mise en page</span>
+            <span aria-hidden="true">⌁</span>
+          </button>
+          <p class="form-error" id="parcel-error" role="alert"></p>
+          <p class="parcel-state" id="parcel-state" aria-live="polite"></p>
+        </form>
+
+        <section class="parcel-result hidden" id="parcel-result" aria-live="polite">
+          <div class="parcel-preview-card">
+            <div class="preview-head">
+              <div>
+                <span class="tab-index">02</span>
+                <strong>Découpe proposée</strong>
+              </div>
+              <span id="parcel-preview-size">ÉCHELLE 1:1</span>
+            </div>
+            <div class="parcel-preview-stage">
+              <img id="parcel-preview" alt="Étiquette détectée avec lignes de découpe">
+            </div>
+          </div>
+
+          <aside class="parcel-summary">
+            <div class="parcel-detected">
+              <span class="parcel-pulse" aria-hidden="true"></span>
+              <span>Détection validée</span>
+            </div>
+            <p class="parcel-side" id="parcel-side">ZONE DROITE</p>
+            <h2 id="parcel-carrier">Transporteur</h2>
+            <div class="parcel-metrics">
+              <div><span>Confiance</span><strong id="parcel-confidence">—</strong></div>
+              <div><span>Format utile</span><strong id="parcel-format">—</strong></div>
+              <div><span>Bandes</span><strong id="parcel-band-count">—</strong></div>
+              <div><span>Rouleau</span><strong id="parcel-roll-length">—</strong></div>
+            </div>
+            <div class="parcel-band-list" id="parcel-band-list"></div>
+            <p class="parcel-notes" id="parcel-notes"></p>
+            <label class="parcel-density">
+              <span>Densité thermique</span>
+              <select id="parcel-density">
+                <option value="7">Claire · 07</option>
+                <option value="12" selected>Normale · 12</option>
+                <option value="15">Foncée · 15</option>
+              </select>
+            </label>
+            <button class="parcel-print-button" id="parcel-print" type="button">
+              <span>Imprimer les bandes</span>
+              <span aria-hidden="true">→</span>
+            </button>
+            <p class="form-error" id="parcel-print-error" role="alert"></p>
+            <p class="print-state" id="parcel-print-state" aria-live="polite"></p>
+          </aside>
+        </section>
       </div>
     </section>
 

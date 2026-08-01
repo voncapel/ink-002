@@ -2,17 +2,16 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from pathlib import Path
 import select
 import shutil
 import socket
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
+from pathlib import Path
 
 from PIL import Image
-
 
 PRINT_WIDTH = 554
 WIRE_WIDTH = 576
@@ -321,7 +320,9 @@ def _send_macos_serial(
         if attempt + 1 < max(1, connect_attempts):
             time.sleep(0.6)
     assert last_error is not None
-    raise RuntimeError(f"could not connect to S002 after {max(1, connect_attempts)} attempts: {last_error}") from last_error
+    raise RuntimeError(
+        f"could not connect to S002 after {max(1, connect_attempts)} attempts: {last_error}"
+    ) from last_error
 
 
 def _send_macos_rfcomm(

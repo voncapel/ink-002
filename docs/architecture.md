@@ -21,6 +21,25 @@ Flask API ──► renderer ──► 554-dot monochrome PNG
                                            S002
 ```
 
+Parcel labels take a separate, deliberately split path:
+
+```text
+PDF/image ──► first-page preview ──► OpenRouter vision geometry
+                                         │
+                                         ▼
+                         local frame snap + critical-region checks
+                                         │
+                                         ▼
+                         full-resolution crop + safe cut optimizer
+                                         │
+                                         ▼
+                              554-dot continuous print roll
+```
+
+The model never produces the printable raster. It only proposes normalized
+geometry; the crop, rotation, cut search, full-resolution PDF render, threshold,
+and roll assembly are deterministic local operations in `parcel.py`.
+
 ## Web and API layer
 
 `app.py` owns the Flask routes, optional Basic authentication, bounded job
@@ -64,4 +83,6 @@ then valid status queries while the thermal mechanism drains its buffer.
 
 Rendered jobs are transient files beneath `S002_DATA_DIR`. They are bounded by
 `MAX_HISTORY` in memory, excluded from Git, and not exposed as a history view in
-the UI. Restarting the process clears the metadata queue.
+the UI. Parcel previews and rolls are separately bounded to eight active
+analyses. Restarting the process clears all metadata and deletes both job and
+parcel PNGs because they can contain private document data.

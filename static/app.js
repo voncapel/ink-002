@@ -6,17 +6,33 @@ const fileLabel = document.querySelector("#file-label");
 const dropzone = document.querySelector(".dropzone");
 const imageEditor = document.querySelector("#image-editor");
 const previewCanvas = document.querySelector("#image-preview");
+const previewStage = document.querySelector(".preview-stage");
 const previewSize = document.querySelector("#preview-size");
 const controls = document.querySelector(".controls");
 const errorBox = document.querySelector("#form-error");
 const printState = document.querySelector("#print-state");
 const submitButton = form.querySelector("button[type=submit]");
 const connection = document.querySelector("#connection");
+const parcelForm = document.querySelector("#parcel-form");
+const parcelFile = document.querySelector("#parcel-file");
+const parcelFileLabel = document.querySelector("#parcel-file-label");
+const parcelDropzone = document.querySelector(".parcel-dropzone");
+const parcelAnalyzeButton = parcelForm.querySelector("button[type=submit]");
+const parcelError = document.querySelector("#parcel-error");
+const parcelState = document.querySelector("#parcel-state");
+const parcelResult = document.querySelector("#parcel-result");
+const parcelPreview = document.querySelector("#parcel-preview");
+const parcelPrintButton = document.querySelector("#parcel-print");
+const parcelPrintError = document.querySelector("#parcel-print-error");
+const parcelPrintState = document.querySelector("#parcel-print-state");
 let mode = "text";
 let sourceFrame = null;
 let previewRequest = null;
 let currentJobId = null;
+let currentJobStateTarget = printState;
+let currentJobErrorTarget = errorBox;
 let pollTimer = null;
+let currentParcelId = null;
 
 textarea.addEventListener("input", () => { count.textContent = textarea.value.length; });
 
@@ -68,9 +84,11 @@ document.querySelectorAll('.range-control input[type="range"]').forEach((input) 
 });
 
 function grayscaleFrame(image) {
-  const contentWidth = 518;
-  const maxPreviewHeight = 900;
-  const scale = Math.min(1, contentWidth / image.naturalWidth, maxPreviewHeight / image.naturalHeight);
+  const printReady = image.naturalWidth === 554;
+  const contentWidth = printReady ? 554 : 518;
+  // A thermal roll has no page height. Only its physical width may constrain
+  // the source; scaling against the preview viewport would shrink long jobs.
+  const scale = Math.min(1, contentWidth / image.naturalWidth);
   const width = Math.max(1, Math.round(image.naturalWidth * scale));
   const height = Math.max(1, Math.round(image.naturalHeight * scale));
   const canvas = document.createElement("canvas");
@@ -99,7 +117,7 @@ function grayscaleFrame(image) {
   for (let index = 0; index < values.length; index += 1) {
     values[index] = (values[index] - low) * 255 / span;
   }
-  return { values, width, height };
+  return { values, width, height, margin: printReady ? 0 : 18, printReady };
 }
 
 function adjustedPixels(frame) {
@@ -194,8 +212,9 @@ function ditherPixels(values, width, height, preset) {
 }
 
 function paintPreview(frame, pixels) {
+  const margin = frame.margin ?? 18;
   previewCanvas.width = 554;
-  previewCanvas.height = frame.height + 36;
+  previewCanvas.height = frame.height + margin * 2;
   const context = previewCanvas.getContext("2d");
   context.fillStyle = "#fff";
   context.fillRect(0, 0, previewCanvas.width, previewCanvas.height);
@@ -207,7 +226,8 @@ function paintPreview(frame, pixels) {
     imageData.data[offset + 2] = value;
     imageData.data[offset + 3] = 255;
   });
-  context.putImageData(imageData, Math.floor((554 - frame.width) / 2), 18);
+  context.putImageData(imageData, Math.floor((554 - frame.width) / 2), margin);
+  previewStage.classList.toggle("long-roll", previewCanvas.height > 900);
   previewSize.textContent = `554 × ${previewCanvas.height} DOTS`;
 }
 
@@ -227,6 +247,7 @@ function schedulePreview() {
 function renderImage(file) {
   const isImage = file && file.type.startsWith("image/");
   imageEditor.classList.toggle("hidden", !isImage);
+  previewStage.classList.remove("long-roll");
   sourceFrame = null;
   if (!isImage) return;
   const objectUrl = URL.createObjectURL(file);
@@ -267,6 +288,107 @@ dropzone.addEventListener("drop", (event) => {
   }
 });
 
+function useParcelFiles(files) {
+  const file = files?.[0];
+  parcelFileLabel.textContent = file?.name || "Choisir un bordereau";
+  parcelResult.classList.add("hidden");
+  parcelError.textContent = "";
+  parcelState.textContent = "";
+  currentParcelId = null;
+}
+
+parcelFile.addEventListener("change", () => useParcelFiles(parcelFile.files));
+
+["dragenter", "dragover"].forEach((name) => parcelDropzone.addEventListener(name, (event) => {
+  event.preventDefault();
+  parcelDropzone.classList.add("dragging");
+}));
+["dragleave", "drop"].forEach((name) => parcelDropzone.addEventListener(name, (event) => {
+  event.preventDefault();
+  parcelDropzone.classList.remove("dragging");
+}));
+parcelDropzone.addEventListener("drop", (event) => {
+  if (event.dataTransfer.files.length) {
+    parcelFile.files = event.dataTransfer.files;
+    useParcelFiles(event.dataTransfer.files);
+  }
+});
+
+function presentParcel(result) {
+  currentParcelId = result.id;
+  document.querySelector("#parcel-carrier").textContent = result.carrier;
+  document.querySelector("#parcel-confidence").textContent = `${Math.round(result.confidence * 100)}%`;
+  document.querySelector("#parcel-format").textContent = `${result.label_width_mm} × ${result.label_height_mm} mm`;
+  document.querySelector("#parcel-band-count").textContent = String(result.band_count).padStart(2, "0");
+  const rollMillimeters = Math.round(result.roll_height / 300 * 25.4);
+  document.querySelector("#parcel-roll-length").textContent = `${rollMillimeters} mm`;
+  document.querySelector("#parcel-side").textContent = `ZONE ${result.document_side.toUpperCase()}`;
+  document.querySelector("#parcel-preview-size").textContent = `${result.band_count} BANDES · 300 DPI`;
+  document.querySelector("#parcel-notes").textContent = result.notes || "Coupes validées hors des zones critiques.";
+  const bandList = document.querySelector("#parcel-band-list");
+  bandList.replaceChildren(...result.band_heights_mm.map((height, index) => {
+    const chip = document.createElement("span");
+    chip.textContent = `${String(index + 1).padStart(2, "0")} · ${height} MM`;
+    return chip;
+  }));
+  parcelPreview.src = `${result.preview_url}?v=${Date.now()}`;
+  parcelResult.classList.remove("hidden");
+  parcelResult.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+parcelForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  parcelError.textContent = "";
+  parcelState.textContent = "";
+  parcelResult.classList.add("hidden");
+  if (!parcelFile.files.length) {
+    parcelError.textContent = "Choisissez un bordereau PDF ou une image";
+    return;
+  }
+  parcelAnalyzeButton.disabled = true;
+  parcelAnalyzeButton.querySelector("span:first-child").textContent = "Luna analyse le document…";
+  parcelState.textContent = "Détection du transporteur, des codes et des lignes de coupe";
+  try {
+    const data = new FormData(parcelForm);
+    const response = await fetch("/api/parcels/analyze", { method: "POST", body: data });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || "Impossible d’analyser le bordereau");
+    presentParcel(result);
+    parcelState.textContent = "Analyse terminée · vérifiez les lignes rouges avant impression";
+  } catch (error) {
+    parcelState.textContent = "";
+    parcelError.textContent = error.message;
+  } finally {
+    parcelAnalyzeButton.disabled = false;
+    parcelAnalyzeButton.querySelector("span:first-child").textContent = "Analyser la mise en page";
+  }
+});
+
+parcelPrintButton.addEventListener("click", async () => {
+  if (!currentParcelId) return;
+  parcelPrintError.textContent = "";
+  parcelPrintState.textContent = "";
+  parcelPrintButton.disabled = true;
+  parcelPrintButton.querySelector("span:first-child").textContent = "Préparation du rouleau…";
+  try {
+    const data = new FormData();
+    data.set("density", document.querySelector("#parcel-density").value);
+    const response = await fetch(`/api/parcels/${currentParcelId}/print`, { method: "POST", body: data });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || "Impossible de lancer l’impression");
+    currentJobId = result.id;
+    currentJobStateTarget = parcelPrintState;
+    currentJobErrorTarget = parcelPrintError;
+    parcelPrintState.textContent = "Bandes en attente d’impression";
+    await refreshHealth();
+  } catch (error) {
+    parcelPrintError.textContent = error.message;
+  } finally {
+    parcelPrintButton.disabled = false;
+    parcelPrintButton.querySelector("span:first-child").textContent = "Imprimer les bandes";
+  }
+});
+
 async function refreshHealth() {
   try {
     const response = await fetch("/api/health", { cache: "no-store" });
@@ -287,15 +409,15 @@ async function refreshCurrentJob() {
     const response = await fetch(`/api/jobs/${currentJobId}`, { cache: "no-store" });
     if (!response.ok) return;
     const job = await response.json();
-    if (job.status === "queued") printState.textContent = "Impression en attente";
-    if (job.status === "printing") printState.textContent = "Impression en cours…";
+    if (job.status === "queued") currentJobStateTarget.textContent = "Impression en attente";
+    if (job.status === "printing") currentJobStateTarget.textContent = "Impression en cours…";
     if (job.status === "done") {
-      printState.textContent = "Impression terminée ✓";
+      currentJobStateTarget.textContent = "Impression terminée ✓";
       currentJobId = null;
     }
     if (job.status === "failed") {
-      printState.textContent = "";
-      errorBox.textContent = job.error || "Échec de l’impression";
+      currentJobStateTarget.textContent = "";
+      currentJobErrorTarget.textContent = job.error || "Échec de l’impression";
       currentJobId = null;
     }
   } catch (_error) {
@@ -325,6 +447,8 @@ form.addEventListener("submit", async (event) => {
     const result = await response.json();
     if (!response.ok) throw new Error(result.error || "Impossible de lancer l’impression");
     currentJobId = result.id;
+    currentJobStateTarget = printState;
+    currentJobErrorTarget = errorBox;
     printState.textContent = "Impression en attente";
     submitButton.querySelector(".button-label").textContent = "Dans la file ✓";
     await refreshHealth();
