@@ -21,7 +21,7 @@ from PIL import Image, ImageDraw, ImageFont, ImageOps
 from s002_protocol import PRINT_WIDTH
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-DEFAULT_MODEL = "google/gemma-4-31b-it:free"
+DEFAULT_MODEL = "google/gemma-4-31b-it"
 RASTER_DPI = 300
 AI_MAX_SIDE = 1600
 SEPARATOR_HEIGHT = 90
