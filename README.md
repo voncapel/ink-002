@@ -26,11 +26,10 @@ SDK, native Android library, or any extracted proprietary source.
   strips use one scale calculated from the tallest source strip, giving every
   printed strip the same fitted feed length without trailing white padding.
   Optional AI calculation is available only when explicitly requested.
-- MTG proxy composer: paste a decklist, resolve each card through Scryfall with
-  a target language, render the cards full-width at 554 dots with the same
-  threshold, dither, contrast, brightness, and sharpness controls as the image
-  editor, then stack them into a continuous roll. Rolls that are too long or
-  too large are split into printable batches automatically.
+- MTG proxy composer: paste a decklist and resolve localized card data through
+  Scryfall. Print either the complete card image or a compact text-first proxy
+  with mana glyphs and optional artwork. Both formats use exact 554-dot live
+  previews and are stacked into automatically split printable batches.
 
 ## Requirements
 
@@ -142,6 +141,9 @@ additional layer. See [SECURITY.md](SECURITY.md).
 | `PORT` | `8092` | Development-server port |
 | `MTG_MAX_BATCH_HEIGHT` | `3000` | Max raster rows per MTG print lot (keeps each lot small enough for the S002 buffer) |
 | `MTG_MAX_BATCH_BYTES` | `200000` | Max encoded size per MTG print lot |
+| `MTG_FONT_PATH` | bundled Atkinson Hyperlegible Next Medium | Optional text font override for compact MTG proxies |
+| `MTG_FONT_BOLD_PATH` | bundled Atkinson Hyperlegible Bold | Optional bold text font override for compact MTG proxies |
+| `MTG_SYMBOL_FONT_PATH` | user Mana font | Optional path to the [Mana symbol font](https://github.com/andrewgioia/mana) |
 
 ## Tests
 
@@ -187,5 +189,4 @@ For implementation details, read [Architecture](docs/architecture.md) and
   printer exposes Bluetooth Classic SPP rather than BLE.
 - The MTG composer resolves cards through the public Scryfall API. The
   mtgdecks.net page is Cloudflare-blocked, so the app takes a pasted decklist
-  instead of scraping that site. Text/ASCII card output is planned but not yet
-  implemented.
+  instead of scraping that site.

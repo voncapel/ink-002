@@ -908,9 +908,13 @@ const mtgPrintSize = document.querySelector("#mtg-print-size");
 const mtgPrintButton = document.querySelector("#mtg-print-button");
 const mtgPrintError = document.querySelector("#mtg-print-error");
 const mtgPrintState = document.querySelector("#mtg-print-state");
+const mtgShowArtwork = document.querySelector("#mtg-show-artwork");
+const mtgArtworkToggle = document.querySelector(".mtg-artwork-toggle");
+const mtgPreviewTitle = document.querySelector("#mtg-preview-title");
 
 let mtgDeck = null;
-let mtgLiveCards = []; // [{ canvas, image, frame }]
+let mtgLiveCards = []; // [{ index, image }]
+let mtgPreviewTimer = null;
 
 mtgForm.addEventListener("submit", (event) => event.preventDefault());
 
@@ -919,129 +923,68 @@ function mtgSetState(panelError, panelState, message) {
   if (panelState) panelState.textContent = message || "";
 }
 
-/* --- live thermal preview shared with the backend card renderer --- */
-function mtgCardFrame(image) {
-  const scale = Math.min(1, 554 / image.naturalWidth);
-  const width = Math.max(1, Math.round(image.naturalWidth * scale));
-  const height = Math.max(1, Math.round(image.naturalHeight * scale));
-  const off = document.createElement("canvas");
-  off.width = width;
-  off.height = height;
-  const octx = off.getContext("2d", { willReadFrequently: true });
-  octx.fillStyle = "#fff";
-  octx.fillRect(0, 0, width, height);
-  octx.drawImage(image, 0, 0, width, height);
-  const frame = octx.getImageData(0, 0, width, height);
-  const values = new Float32Array(width * height);
-  let low = 255;
-  let high = 0;
-  for (let index = 0; index < values.length; index += 1) {
-    const offset = index * 4;
-    const gray = frame.data[offset] * .299 + frame.data[offset + 1] * .587 + frame.data[offset + 2] * .114;
-    values[index] = gray;
-    low = Math.min(low, gray);
-    high = Math.max(high, gray);
-  }
-  const span = Math.max(1, high - low);
-  for (let index = 0; index < values.length; index += 1) {
-    values[index] = (values[index] - low) * 255 / span;
-  }
-  return { values, width, height };
+/* --- exact live preview rendered by the same backend code as the roll --- */
+function mtgRenderMode() {
+  return document.querySelector('input[name="mtg-render-mode"]:checked').value;
 }
 
-function mtgAdjustedValues(frame) {
-  const brightness = Number(document.querySelector("#mtg-brightness").value) / 100;
-  const contrast = Number(document.querySelector("#mtg-contrast").value) / 100;
-  const sharpness = Number(document.querySelector("#mtg-sharpness").value) / 100;
-  const values = Float32Array.from(frame.values, (value) => Math.max(0, Math.min(255, value * brightness)));
-  let mean = 0;
-  values.forEach((value) => { mean += value; });
-  mean /= values.length;
-  for (let index = 0; index < values.length; index += 1) {
-    values[index] = Math.max(0, Math.min(255, mean + (values[index] - mean) * contrast));
-  }
-  if (sharpness === 1) return values;
-  const original = new Float32Array(values);
-  const { width, height } = frame;
-  for (let y = 1; y < height - 1; y += 1) {
-    for (let x = 1; x < width - 1; x += 1) {
-      const index = y * width + x;
-      let weighted = original[index] * 5;
-      for (let dy = -1; dy <= 1; dy += 1) {
-        for (let dx = -1; dx <= 1; dx += 1) {
-          if (dx !== 0 || dy !== 0) weighted += original[(y + dy) * width + x + dx];
-        }
-      }
-      const smooth = weighted / 13;
-      values[index] = Math.max(0, Math.min(255, smooth + (original[index] - smooth) * sharpness));
-    }
-  }
-  return values;
-}
-
-function mtgPaintCard(canvas, frame, pixels) {
-  canvas.width = frame.width;
-  canvas.height = frame.height;
-  const context = canvas.getContext("2d");
-  context.fillStyle = "#fff";
-  context.fillRect(0, 0, canvas.width, canvas.height);
-  const imageData = context.createImageData(frame.width, frame.height);
-  pixels.forEach((value, index) => {
-    const offset = index * 4;
-    imageData.data[offset] = value;
-    imageData.data[offset + 1] = value;
-    imageData.data[offset + 2] = value;
-    imageData.data[offset + 3] = 255;
+function mtgPreviewUrl(index) {
+  const params = new URLSearchParams({
+    render_mode: mtgRenderMode(),
+    show_artwork: mtgShowArtwork.checked ? "1" : "0",
+    dither: document.querySelector('input[name="mtg-dither"]:checked').value,
+    contrast: document.querySelector("#mtg-contrast").value,
+    brightness: document.querySelector("#mtg-brightness").value,
+    sharpness: document.querySelector("#mtg-sharpness").value,
   });
-  context.putImageData(imageData, 0, 0);
+  return `/api/mtg/deck/${mtgDeck.id}/cards/${index}/live-preview?${params}`;
 }
 
 function mtgLiveRefresh() {
   if (!mtgDeck || !mtgLiveCards.length) return;
-  const preset = document.querySelector('input[name="mtg-dither"]:checked').value;
   mtgLiveCards.forEach((item) => {
-    const pixels = ditherPixels(
-      mtgAdjustedValues(item.frame),
-      item.frame.width,
-      item.frame.height,
-      preset,
-    );
-    mtgPaintCard(item.canvas, item.frame, pixels);
+    item.image.src = mtgPreviewUrl(item.index);
   });
 }
 
-async function mtgBuildLiveStrip() {
+function mtgScheduleLiveRefresh() {
+  window.clearTimeout(mtgPreviewTimer);
+  mtgPreviewTimer = window.setTimeout(mtgLiveRefresh, 180);
+}
+
+function mtgSyncFormatControls() {
+  const optimized = mtgRenderMode() === "optimized";
+  mtgShowArtwork.disabled = !optimized;
+  mtgArtworkToggle.classList.toggle("is-disabled", !optimized);
+  mtgPreviewTitle.textContent = optimized
+    ? `Aperçu exact · optimisé ${mtgShowArtwork.checked ? "avec illustration" : "texte seul"}`
+    : "Aperçu exact · carte complète";
+  mtgLiveRefresh();
+}
+
+function mtgBuildLiveStrip() {
   mtgLiveCards = [];
   const cards = mtgDeck.cards;
   const count = Math.min(3, cards.length);
   const indexes = [...cards.keys()].sort(() => Math.random() - 0.5).slice(0, count);
   const strip = document.createElement("div");
   strip.className = "mtg-live-strip-inner";
-  const loaded = [];
-  await Promise.all(indexes.map((index) => new Promise((resolve) => {
-    const image = new Image();
-    image.crossOrigin = "anonymous";
-    image.onload = () => {
-      loaded.push({ index, image });
-      resolve();
-    };
-    image.onerror = resolve;
-    image.src = cards[index].image_url;
-  })));
-  loaded.forEach(({ index, image }) => {
+  indexes.forEach((index) => {
     const card = cards[index];
     const figure = document.createElement("figure");
     figure.className = "mtg-live-card";
-    const canvas = document.createElement("canvas");
+    const image = document.createElement("img");
+    image.alt = `Aperçu thermique de ${card.resolved_name || card.requested_name}`;
+    image.loading = "eager";
     const caption = document.createElement("figcaption");
     caption.textContent = `${card.resolved_name || card.requested_name} ×${card.qty}`;
-    figure.appendChild(canvas);
+    figure.appendChild(image);
     figure.appendChild(caption);
     strip.appendChild(figure);
-    mtgLiveCards.push({ canvas, image, frame: mtgCardFrame(image) });
+    mtgLiveCards.push({ index, image });
   });
   mtgLiveStrip.replaceChildren(strip);
-  mtgLiveRefresh();
+  mtgSyncFormatControls();
 }
 
 document.querySelectorAll('input[name="mtg-dither"]').forEach((input) => {
@@ -1049,15 +992,20 @@ document.querySelectorAll('input[name="mtg-dither"]').forEach((input) => {
     document.querySelectorAll("#mtg-live .dither-card").forEach((card) => {
       card.classList.toggle("selected", card.contains(input));
     });
-    mtgLiveRefresh();
+    mtgScheduleLiveRefresh();
   });
 });
 document.querySelectorAll("#mtg-live .range-control input[type='range']").forEach((input) => {
   input.addEventListener("input", () => {
     document.querySelector(`#mtg-live output[for="${input.id}"]`).value = input.value;
-    mtgLiveRefresh();
+    mtgScheduleLiveRefresh();
   });
 });
+
+document.querySelectorAll('input[name="mtg-render-mode"]').forEach((input) => {
+  input.addEventListener("change", mtgSyncFormatControls);
+});
+mtgShowArtwork.addEventListener("change", mtgSyncFormatControls);
 
 async function mtgAnalyzeClick() {
   mtgSetState(mtgAnalyzeError, mtgAnalyzeState, "");
@@ -1135,6 +1083,8 @@ async function mtgRenderClick() {
       body: JSON.stringify({
         dither,
         include,
+        render_mode: mtgRenderMode(),
+        show_artwork: mtgShowArtwork.checked,
         contrast: Number(document.querySelector("#mtg-contrast").value),
         brightness: Number(document.querySelector("#mtg-brightness").value),
         sharpness: Number(document.querySelector("#mtg-sharpness").value),
@@ -1149,9 +1099,12 @@ async function mtgRenderClick() {
     document.querySelector("#mtg-metric-lang").textContent = result.lang.toUpperCase();
     document.querySelector("#mtg-metric-batches").textContent = String(result.batches.length);
     document.querySelector("#mtg-metric-roll").textContent = `${rollMm} mm`;
+    const formatLabel = result.render_mode === "full"
+      ? "cartes complètes"
+      : result.show_artwork ? "fiches optimisées avec illustration" : "fiches texte ultra-compactes";
     document.querySelector("#mtg-notes").textContent = result.batches.length > 1
-      ? `Le rouleau est découpé en ${result.batches.length} lots (max ${result.max_batch_height} rangées).`
-      : "Rouleau continu unique, aucune découpe nécessaire.";
+      ? `${formatLabel} · rouleau découpé en ${result.batches.length} lots (max ${result.max_batch_height} rangées).`
+      : `${formatLabel} · rouleau continu unique.`;
     mtgPrintSize.textContent = `${result.roll_height} rangées · ${result.batches.length} lot${result.batches.length > 1 ? "s" : ""}`;
     mtgPrint.classList.remove("hidden");
     mtgPrint.scrollIntoView({ behavior: "smooth", block: "start" });

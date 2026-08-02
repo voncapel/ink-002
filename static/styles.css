@@ -412,10 +412,37 @@ footer { max-width: 1400px; display: flex; justify-content: space-between; margi
 
 .mtg-main { display: grid; gap: 22px; min-width: 0; }
 .mtg-live, .mtg-print { border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); overflow: hidden; }
+.mtg-format-panel {
+  display: grid;
+  grid-template-columns: minmax(320px, 1fr) minmax(230px, .72fr);
+  border-bottom: 1px solid var(--line);
+  background: var(--panel-2);
+}
+.mtg-format-fieldset { min-width: 0; margin: 0; padding: 17px 22px 20px; border: 0; border-right: 1px solid var(--line); }
+.mtg-format-fieldset legend { padding: 0; color: var(--muted); font: 800 9px/1 var(--mono); letter-spacing: .09em; text-transform: uppercase; }
+.mtg-format-switch { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; margin-top: 10px; padding: 4px; border: 1px solid var(--line); border-radius: 4px; background: var(--panel); }
+.mtg-format-switch label { position: relative; min-width: 0; cursor: pointer; }
+.mtg-format-switch input { position: absolute; opacity: 0; pointer-events: none; }
+.mtg-format-switch span { min-height: 48px; display: grid; align-content: center; gap: 3px; padding: 0 12px; border: 1px solid transparent; border-radius: 2px; color: var(--muted); transition: background .14s ease, border-color .14s ease, color .14s ease; }
+.mtg-format-switch b { color: inherit; font-size: 12px; letter-spacing: .02em; }
+.mtg-format-switch small { color: inherit; font: 700 9px/1.2 var(--mono); text-transform: uppercase; }
+.mtg-format-switch label:has(input:checked) span { border-color: color-mix(in srgb, var(--orange) 72%, var(--line)); background: color-mix(in srgb, var(--orange) 12%, var(--panel)); color: var(--text); }
+.mtg-format-switch label:has(input:focus-visible) span { outline: 2px solid var(--blue); outline-offset: 2px; }
+.mtg-artwork-toggle { min-width: 0; display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 14px; padding: 20px 22px; cursor: pointer; }
+.mtg-toggle-copy { display: grid; gap: 5px; }
+.mtg-toggle-copy b { color: var(--text); font-size: 12px; letter-spacing: .02em; }
+.mtg-toggle-copy small { color: var(--muted); font-size: 10px; line-height: 1.35; }
+.mtg-artwork-toggle input { position: absolute; opacity: 0; pointer-events: none; }
+.mtg-toggle-track { width: 42px; height: 24px; padding: 3px; border: 1px solid var(--line); border-radius: 14px; background: #2f343c; transition: background .14s ease, border-color .14s ease; }
+.mtg-toggle-track span { display: block; width: 16px; height: 16px; border-radius: 50%; background: var(--muted); transition: transform .16s ease, background .16s ease; }
+.mtg-artwork-toggle input:checked + .mtg-toggle-track { border-color: var(--orange); background: color-mix(in srgb, var(--orange) 24%, #2f343c); }
+.mtg-artwork-toggle input:checked + .mtg-toggle-track span { transform: translateX(18px); background: var(--orange); }
+.mtg-artwork-toggle input:focus-visible + .mtg-toggle-track { outline: 2px solid var(--blue); outline-offset: 3px; }
+.mtg-artwork-toggle.is-disabled { opacity: .42; cursor: not-allowed; }
 .mtg-live-strip { padding: 18px 22px; }
 .mtg-live-strip-inner { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; align-items: start; }
 .mtg-live-card { margin: 0; display: grid; gap: 8px; }
-.mtg-live-card canvas { width: 100%; height: auto; border: 1px solid var(--line); background: #fff; }
+.mtg-live-card img { display: block; width: 100%; height: auto; border: 1px solid var(--line); background: #fff; image-rendering: pixelated; }
 .mtg-live-card figcaption { color: var(--muted); font: 700 10px/1.3 var(--mono); }
 .mtg-editor-controls { border-top: 1px solid var(--line); }
 .mtg-render-actions { padding: 18px 22px; }
@@ -427,6 +454,8 @@ footer { max-width: 1400px; display: flex; justify-content: space-between; margi
 @media (max-width: 900px) {
   .mtg-layout { grid-template-columns: 1fr; }
   .mtg-sidebar { position: static; }
+  .mtg-format-panel { grid-template-columns: 1fr; }
+  .mtg-format-fieldset { border-right: 0; border-bottom: 1px solid var(--line); }
 }
 
 @media (max-width: 680px) {

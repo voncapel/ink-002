@@ -9,6 +9,7 @@ import uuid
 from collections import OrderedDict
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
+from io import BytesIO
 from pathlib import Path
 from queue import Queue
 
@@ -28,6 +29,7 @@ from mtg import (
     DEFAULT_LANG,
     MAX_BATCH_BYTES,
     MAX_BATCH_HEIGHT,
+    MTG_RENDER_MODES,
     BatchInfo,
     MtgDeck,
     MtgError,
@@ -548,6 +550,10 @@ def render_mtg_deck(deck_id):
         contrast = int(payload.get("contrast", "100"))
         brightness = int(payload.get("brightness", "100"))
         sharpness = int(payload.get("sharpness", "100"))
+        render_mode = str(payload.get("render_mode", "optimized"))
+        show_artwork = bool(payload.get("show_artwork", True))
+        if render_mode not in MTG_RENDER_MODES:
+            raise MtgError("format de carte inconnu")
         if not 40 <= contrast <= 200:
             raise MtgError("le contraste doit rester entre 40 et 200")
         if not 40 <= brightness <= 160:
@@ -576,6 +582,8 @@ def render_mtg_deck(deck_id):
                 contrast=contrast,
                 brightness=brightness,
                 sharpness=sharpness,
+                render_mode=render_mode,
+                show_artwork=show_artwork,
             )
             image.save(MTG_DIR / f"{deck_id}-card-{index}.png", format="PNG", optimize=True)
             rendered.append((card, image))
@@ -590,11 +598,54 @@ def render_mtg_deck(deck_id):
         with mtg_lock:
             deck.batches = batch_infos
             deck.gallery = gallery
+            deck.render_mode = render_mode
+            deck.show_artwork = show_artwork
         deck_info = deck.public()
         deck_info["roll_height"] = sum(batch.height for batch in batches)
         deck_info["max_batch_height"] = MAX_BATCH_HEIGHT
         deck_info["max_batch_bytes"] = MAX_BATCH_BYTES
         return jsonify(deck_info)
+    except (MtgError, RuntimeError, ValueError, OSError) as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+@app.get("/api/mtg/deck/<deck_id>/cards/<int:index>/live-preview")
+def mtg_card_live_preview(deck_id, index):
+    """Return an exact renderer preview before the final roll is prepared."""
+    try:
+        deck = get_mtg_deck(deck_id)
+        if deck is None:
+            return jsonify({"error": "deck not found"}), 404
+        if not 0 <= index < len(deck.cards):
+            return jsonify({"error": "card not found"}), 404
+        render_mode = request.args.get("render_mode", "optimized")
+        if render_mode not in MTG_RENDER_MODES:
+            raise MtgError("format de carte inconnu")
+        dither = request.args.get("dither", "floyd")
+        if dither not in DITHER_PRESETS:
+            raise MtgError("trame d'impression inconnue")
+        contrast = int(request.args.get("contrast", "100"))
+        brightness = int(request.args.get("brightness", "100"))
+        sharpness = int(request.args.get("sharpness", "100"))
+        show_artwork = request.args.get("show_artwork", "1") not in {"0", "false"}
+        if not 40 <= contrast <= 200 or not 40 <= brightness <= 160 or not 0 <= sharpness <= 250:
+            raise MtgError("réglage d'image hors limites")
+        image = render_card_image(
+            deck.cards[index],
+            cache_dir=MTG_CACHE_DIR,
+            dither=dither,
+            contrast=contrast,
+            brightness=brightness,
+            sharpness=sharpness,
+            render_mode=render_mode,
+            show_artwork=show_artwork,
+        )
+        stream = BytesIO()
+        image.save(stream, format="PNG", optimize=True)
+        stream.seek(0)
+        response = send_file(stream, mimetype="image/png", max_age=0)
+        response.headers["Cache-Control"] = "private, no-store"
+        return response
     except (MtgError, RuntimeError, ValueError, OSError) as exc:
         return jsonify({"error": str(exc)}), 400
 
