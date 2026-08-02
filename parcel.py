@@ -24,9 +24,8 @@ OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 DEFAULT_MODEL = "google/gemma-4-31b-it"
 RASTER_DPI = 300
 AI_MAX_SIDE = 1600
-SEPARATOR_HEIGHT = 90
+SEPARATOR_HEIGHT = 18
 BALANCE_WEIGHT = 12.0
-MIN_BALANCED_BAND_RATIO = 0.70
 SUPPORTED_IMAGES = {".png", ".jpg", ".jpeg", ".webp"}
 ANALYSIS_CACHE_SIZE = 12
 _analysis_cache: OrderedDict[str, dict[str, Any]] = OrderedDict()
@@ -373,7 +372,7 @@ def _normalized_box(raw: dict[str, Any], width: int, height: int) -> Box:
     y0 = round(max(0, min(1000, y0)) * height / 1000)
     x1 = round(max(0, min(1000, x1)) * width / 1000)
     y1 = round(max(0, min(1000, y1)) * height / 1000)
-    if x1 - x0 < width * 0.12 or y1 - y0 < height * 0.12:
+    if x1 <= x0 or y1 <= y0:
         raise ParcelError("La zone détectée est trop petite pour être une étiquette")
     return Box(x0, y0, x1, y1)
 
@@ -387,7 +386,7 @@ def _manual_box(raw: dict[str, Any], width: int, height: int) -> Box:
         round(max(0, min(1000, x1)) * width / 1000),
         round(max(0, min(1000, y1)) * height / 1000),
     )
-    if box.width < max(8, width * 0.02) or box.height < max(8, height * 0.02):
+    if box.width < 1 or box.height < 1:
         raise ParcelError("Le cadre manuel est trop petit")
     return box
 
@@ -606,10 +605,7 @@ def choose_cuts(
         suggestion_values = []
     suggestions = sorted(round(value * height / 1000) for value in suggestion_values)
     ideal_band = height / band_count
-    min_band = max(
-        round(RASTER_DPI * 12 / 25.4),
-        math.floor(ideal_band * MIN_BALANCED_BAND_RATIO),
-    )
+    min_band = 1
     row_costs = [_row_cut_cost(gray, y, forbidden) for y in range(height)]
     previous: dict[int, tuple[float, int | None]] = {0: (0.0, None)}
     layers: list[dict[int, tuple[float, int]]] = []
@@ -686,25 +682,37 @@ def _thermal_image(image: Image.Image) -> Image.Image:
 
 def build_roll(label: Image.Image, cuts: tuple[int, ...]) -> tuple[Image.Image, tuple[float, ...]]:
     boundaries = (0, *cuts, label.height)
-    bands: list[Image.Image] = []
-    heights_mm = []
+    rotated_bands: list[Image.Image] = []
     font = ImageFont.load_default(size=18)
-    for number, (start, end) in enumerate(zip(boundaries, boundaries[1:], strict=False), 1):
-        source_band = _thermal_image(label.crop((0, start, label.width, end)))
+    for start, end in zip(boundaries, boundaries[1:], strict=False):
+        source_band = _safe_image(label.crop((0, start, label.width, end)))
         rotated = source_band.transpose(Image.Transpose.ROTATE_90)
-        if rotated.width > PRINT_WIDTH:
-            raise ParcelError(f"La bande {number} dépasse la largeur physique de la S002")
-        strip = Image.new("L", (PRINT_WIDTH, rotated.height), 255)
-        strip.paste(rotated, (0, 0))
+        rotated_bands.append(rotated)
+
+    tallest_band_width = max(band.width for band in rotated_bands)
+    common_scale = min(1.0, PRINT_WIDTH / tallest_band_width)
+    fitted_bands = []
+    for band in rotated_bands:
+        fitted_width = max(1, round(band.width * common_scale))
+        fitted_height = max(1, round(band.height * common_scale))
+        fitted = band.resize((fitted_width, fitted_height), Image.Resampling.LANCZOS)
+        fitted_bands.append(_thermal_image(fitted))
+
+    bands: list[Image.Image] = []
+    for number, fitted in enumerate(fitted_bands, 1):
+        strip = Image.new("L", (PRINT_WIDTH, fitted.height), 255)
+        strip.paste(fitted, (0, 0))
         draw = ImageDraw.Draw(strip)
-        if rotated.width < PRINT_WIDTH - 8:
-            guide_x = rotated.width + 2
+        if fitted.width < PRINT_WIDTH - 8:
+            guide_x = fitted.width + 2
             for y in range(0, strip.height, 28):
                 draw.line((guide_x, y, guide_x, min(y + 14, strip.height)), fill=0, width=2)
             if PRINT_WIDTH - guide_x > 50:
                 draw.text((guide_x + 8, 20), f"COUPER {number}", fill=0, font=font)
         bands.append(strip)
-        heights_mm.append((end - start) * 25.4 / RASTER_DPI)
+
+    common_length_mm = fitted_bands[0].height * 25.4 / RASTER_DPI
+    heights_mm = [common_length_mm] * len(bands)
 
     total_height = sum(band.height for band in bands) + SEPARATOR_HEIGHT * (len(bands) - 1)
     roll = Image.new("L", (PRINT_WIDTH, total_height), 255)
@@ -746,7 +754,7 @@ def analyze_parcel(filename: str, content: bytes) -> ParcelOutput:
         carrier=str(analysis.get("carrier") or "Transporteur"),
         confidence=float(analysis.get("confidence", 0)),
         document_side=str(analysis.get("document_side") or "unknown"),
-        notes="Coupes recalculées localement hors des zones critiques.",
+        notes="Échelle commune calculée sur la bande la plus haute, sans blanc ajouté en longueur.",
         label_width_mm=width_mm,
         label_height_mm=height_mm,
         cuts_px=cuts,
@@ -776,24 +784,14 @@ def compose_manual_parcel(
         cut_ratios.append(max(1 / label.height, min(1 - 1 / label.height, ratio)))
     cuts = tuple(sorted({round(ratio * label.height) for ratio in cut_ratios}))
     boundaries = (0, *cuts, label.height)
-    if any(
-        end <= start
-        for start, end in zip(boundaries, boundaries[1:], strict=False)
-    ):
+    if any(end <= start for start, end in zip(boundaries, boundaries[1:], strict=False)):
         raise ParcelError("Les lignes de coupe doivent être distinctes et ordonnées")
-    if any(
-        end - start > PRINT_WIDTH
-        for start, end in zip(boundaries, boundaries[1:], strict=False)
-    ):
-        raise ParcelError(
-            "Une bande dépasse 46,9 mm : ajoutez une coupe ou rapprochez les lignes"
-        )
     roll, band_heights = build_roll(label, cuts)
     return ParcelOutput(
         carrier="Découpe manuelle",
         confidence=1.0,
         document_side="custom",
-        notes="Cadre et lignes définis manuellement. Aucun modèle utilisé.",
+        notes="Échelle commune calculée sur la bande la plus haute, longueurs égales sans blanc final.",
         label_width_mm=width_mm,
         label_height_mm=height_mm,
         cuts_px=cuts,

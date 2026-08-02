@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#101114">
   <title>INK 002</title>
-  <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='styles.css', v='mtg-4') }}">
 </head>
 <body>
   <header class="topbar">
@@ -13,28 +13,16 @@
       <span class="brand-mark" aria-hidden="true"></span>
       <span>INK <b>002</b></span>
     </a>
+    <nav class="top-tabs" aria-label="Sections">
+      <button class="main-tab active" type="button" data-view="print" aria-selected="true">Imprimer</button>
+      <button class="main-tab parcel-tab" type="button" data-view="parcel" aria-selected="false">Resize</button>
+      <button class="main-tab mtg-tab" type="button" data-view="mtg" aria-selected="false">MTG</button>
+    </nav>
     <div class="connection" id="connection" data-idle-label="{{ idle_label }}">
       <span class="status-square" aria-hidden="true"></span>
       <span>S002 · vérification</span>
     </div>
   </header>
-
-  <nav class="main-tabs" aria-label="Sections">
-    <button class="main-tab active" type="button" data-view="print" aria-selected="true">
-      <span class="tab-index">01</span>
-      <strong>Imprimer</strong>
-    </button>
-    <button class="main-tab parcel-tab" type="button" data-view="parcel" aria-selected="false">
-      <span class="tab-index">02</span>
-      <strong>Colis</strong>
-      <small>vision</small>
-    </button>
-    <button class="main-tab mtg-tab" type="button" data-view="mtg" aria-selected="false">
-      <span class="tab-index">03</span>
-      <strong>MTG</strong>
-      <small>next</small>
-    </button>
-  </nav>
 
   <main>
     <section class="view active" id="print-view" aria-labelledby="print-title">
@@ -170,9 +158,9 @@
       <div class="view-head">
         <div>
           <p class="kicker parcel-kicker">MANUEL / ÉCHELLE 1:1</p>
-          <h1 id="parcel-title">Étiquette colis</h1>
+          <h1 id="parcel-title">Resize</h1>
         </div>
-        <p class="view-note">Cadrez la zone utile.<br>Placez les coupes à la main.</p>
+        <p class="view-note">Cadrez la zone utile.<br>Réglez le rythme des bandes.</p>
       </div>
 
       <div class="parcel-workbench">
@@ -210,7 +198,8 @@
           </div>
           <div class="manual-workspace">
             <div class="manual-canvas-stage">
-              <canvas id="parcel-manual-canvas" aria-label="Page complète avec cadre et lignes de coupe ajustables"></canvas>
+              <canvas id="parcel-manual-canvas" tabindex="0" aria-label="Page complète avec cadre et lignes de coupe ajustables" aria-describedby="manual-canvas-help"></canvas>
+              <p class="sr-only" id="manual-canvas-help">Sélectionnez une coupe, puis utilisez les flèches verticales pour ajuster les bandes. La touche Majuscule accélère le déplacement.</p>
             </div>
             <aside class="manual-tools">
               <div class="manual-readout">
@@ -231,10 +220,10 @@
               <div class="manual-tool-group">
                 <span class="manual-tool-label">Répartition des bandes</span>
                 <div class="manual-segmented" role="group" aria-label="Mode de déplacement">
-                  <button class="active" id="manual-linked" type="button">Égales</button>
-                  <button id="manual-independent" type="button">Individuels</button>
+                  <button class="active" id="manual-linked" type="button" aria-pressed="true">Égales</button>
+                  <button id="manual-independent" type="button" aria-pressed="false">Individuelles</button>
                 </div>
-                <p>En mode égal, le haut et le bas du cadre comptent aussi : toutes les bandes gardent exactement la même hauteur.</p>
+                <p id="manual-mode-hint">Glissez une coupe : écartez les lignes pour retirer des bandes, rapprochez-les pour en ajouter.</p>
               </div>
 
               <div class="manual-tool-group manual-line-actions">
@@ -246,7 +235,7 @@
                 <span>Auto calcul <small>IA · OPTIONNEL</small></span>
                 <span aria-hidden="true">⌁</span>
               </button>
-              <p class="manual-hint">Le mode égal redistribue les coupes entre les deux bords. Passez en individuel pour déplacer un trait librement.</p>
+              <p class="manual-hint">Au relâchement, le mode égal répartit aussi l’espace restant jusqu’aux deux bords.</p>
               <p class="form-error" id="manual-error" role="alert"></p>
               <button class="parcel-compose-button" id="parcel-compose" type="button">
                 <span>Préparer les bandes</span>
@@ -261,12 +250,12 @@
             <div class="preview-head">
               <div>
                 <span class="tab-index">03</span>
-                <strong>Sortie prête</strong>
+                <strong>Rouleau final imprimé</strong>
               </div>
               <span id="parcel-preview-size">ÉCHELLE 1:1</span>
             </div>
             <div class="parcel-preview-stage">
-              <img id="parcel-preview" alt="Étiquette détectée avec lignes de découpe">
+              <img id="parcel-preview" alt="Aperçu exact du rouleau thermique envoyé à la S002">
             </div>
           </div>
 
@@ -305,12 +294,157 @@
     </section>
 
     <section class="view" id="mtg-view" aria-labelledby="mtg-title" hidden>
-      <div class="mtg-soon">
-        <span class="mtg-symbol" aria-hidden="true">M</span>
-        <p class="kicker">PROCHAINE ÉTAPE</p>
-        <h1 id="mtg-title">MTG proxies</h1>
-        <p>Une carte, un format, une impression.<br>Le deck builder arrive ensuite.</p>
-        <span class="todo-label">TODO / NEXT</span>
+      <div class="view-head">
+        <div>
+          <p class="kicker mtg-kicker">SCRYFALL / 554 DOTS</p>
+          <h1 id="mtg-title">MTG proxies</h1>
+        </div>
+        <p class="view-note">Collez une decklist.<br>Préparez le rouleau de proxies.</p>
+      </div>
+
+      <div class="mtg-layout">
+        <aside class="mtg-sidebar">
+          <form id="mtg-form" class="mtg-form">
+            <div class="parcel-step-head">
+              <span class="parcel-step-number">01</span>
+              <div>
+                <strong>Decklist</strong>
+                <small>Nom + quantité, ex. « 4 Lightning Bolt »</small>
+              </div>
+            </div>
+            <label class="sr-only" for="mtg-deck-text">Liste de cartes</label>
+            <textarea id="mtg-deck-text" rows="14" placeholder="4 Lightning Bolt&#10;20 Mountain&#10;// sideboard&#10;4 Consider" spellcheck="false"></textarea>
+
+            <label class="mtg-field" for="mtg-lang">Langue des cartes</label>
+            <select id="mtg-lang">
+              <option value="fr" selected>Français</option>
+              <option value="en">Anglais</option>
+              <option value="de">Deutsch</option>
+              <option value="it">Italiano</option>
+              <option value="pt">Português</option>
+              <option value="es">Español</option>
+              <option value="ja">日本語</option>
+              <option value="zh">简体中文</option>
+              <option value="ko">한국어</option>
+              <option value="ru">Русский</option>
+            </select>
+
+            <button class="mtg-analyze-button" id="mtg-analyze" type="button">
+              <span>Analyser</span>
+              <span aria-hidden="true">→</span>
+            </button>
+            <p class="form-error" id="mtg-analyze-error" role="alert"></p>
+            <p class="parcel-state" id="mtg-analyze-state" aria-live="polite"></p>
+            <p class="mtg-missing" id="mtg-missing"></p>
+          </form>
+        </aside>
+
+        <div class="mtg-main">
+          <section class="mtg-live hidden" id="mtg-live" aria-live="polite">
+            <div class="preview-head">
+              <div>
+                <span class="tab-index">02</span>
+                <strong>Aperçu live · 3 cartes témoins</strong>
+              </div>
+              <span>554 DOTS</span>
+            </div>
+
+            <div class="mtg-live-strip" id="mtg-live-strip"></div>
+
+            <div class="editor-controls mtg-editor-controls">
+              <fieldset class="dither-fieldset">
+                <legend>Trame</legend>
+                <div class="dither-grid">
+                  <label class="dither-card">
+                    <input type="radio" name="mtg-dither" value="threshold">
+                    <span><b>Seuil</b><small>Franc</small></span>
+                  </label>
+                  <label class="dither-card selected">
+                    <input type="radio" name="mtg-dither" value="floyd" checked>
+                    <span><b>Floyd</b><small>Photo</small></span>
+                  </label>
+                  <label class="dither-card">
+                    <input type="radio" name="mtg-dither" value="atkinson">
+                    <span><b>Atkinson</b><small>Doux</small></span>
+                  </label>
+                  <label class="dither-card">
+                    <input type="radio" name="mtg-dither" value="bayer4">
+                    <span><b>Bayer 4</b><small>Trame</small></span>
+                  </label>
+                  <label class="dither-card">
+                    <input type="radio" name="mtg-dither" value="bayer8">
+                    <span><b>Bayer 8</b><small>Fin</small></span>
+                  </label>
+                </div>
+              </fieldset>
+
+              <div class="adjustments">
+                <label class="range-control">
+                  <span><b>Contraste</b><output for="mtg-contrast">100</output></span>
+                  <input id="mtg-contrast" type="range" min="40" max="200" value="100" step="1">
+                </label>
+                <label class="range-control">
+                  <span><b>Clarté</b><output for="mtg-brightness">100</output></span>
+                  <input id="mtg-brightness" type="range" min="40" max="160" value="100" step="1">
+                </label>
+                <label class="range-control">
+                  <span><b>Netteté</b><output for="mtg-sharpness">100</output></span>
+                  <input id="mtg-sharpness" type="range" min="0" max="250" value="100" step="1">
+                </label>
+              </div>
+            </div>
+
+            <div class="mtg-render-actions">
+              <button class="mtg-render-button" id="mtg-render-button" type="button">
+                <span>Préparer le rouleau</span>
+                <span aria-hidden="true">→</span>
+              </button>
+            </div>
+            <p class="form-error" id="mtg-render-error" role="alert"></p>
+            <p class="parcel-state" id="mtg-render-state" aria-live="polite"></p>
+          </section>
+
+          <section class="mtg-print hidden" id="mtg-print" aria-live="polite">
+            <div class="preview-head">
+              <div>
+                <span class="tab-index">03</span>
+                <strong>Impression du rouleau</strong>
+              </div>
+              <span id="mtg-print-size">—</span>
+            </div>
+
+            <div class="mtg-roll-preview" id="mtg-roll-preview"></div>
+
+            <aside class="parcel-summary mtg-summary-panel">
+              <div class="parcel-detected">
+                <span class="parcel-pulse" aria-hidden="true"></span>
+                <span>Rouleau prêt</span>
+              </div>
+              <h2 id="mtg-title-label">Deck MTG</h2>
+              <div class="parcel-metrics">
+                <div><span>Cartes</span><strong id="mtg-metric-cards">—</strong></div>
+                <div><span>Langue</span><strong id="mtg-metric-lang">—</strong></div>
+                <div><span>Lots</span><strong id="mtg-metric-batches">—</strong></div>
+                <div><span>Rouleau</span><strong id="mtg-metric-roll">—</strong></div>
+              </div>
+              <p class="parcel-notes" id="mtg-notes"></p>
+              <label class="parcel-density">
+                <span>Densité thermique</span>
+                <select id="mtg-density">
+                  <option value="7">Claire · 07</option>
+                  <option value="12" selected>Normale · 12</option>
+                  <option value="15">Foncée · 15</option>
+                </select>
+              </label>
+              <button class="parcel-print-button" id="mtg-print-button" type="button">
+                <span>Imprimer les lots</span>
+                <span aria-hidden="true">→</span>
+              </button>
+              <p class="form-error" id="mtg-print-error" role="alert"></p>
+              <p class="print-state" id="mtg-print-state" aria-live="polite"></p>
+            </aside>
+          </section>
+        </div>
       </div>
     </section>
   </main>
@@ -320,6 +454,6 @@
     <span>{{ transport_label }}</span>
   </footer>
 
-  <script src="{{ url_for('static', filename='app.js') }}" defer></script>
+  <script src="{{ url_for('static', filename='app.js', v='mtg-4') }}" defer></script>
 </body>
 </html>

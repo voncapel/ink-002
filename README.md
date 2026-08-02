@@ -22,11 +22,15 @@ SDK, native Android library, or any extracted proprietary source.
 - Native Linux/BlueZ RFCOMM transport for a permanent home relay.
 - Optional HTTP Basic authentication for remotely exposed installations.
 - Manual parcel-label workshop with a full-page preview, draggable crop frame,
-  linked or independent cut lines, and exact 554-dot roll generation. Optional
-  AI calculation is available only when explicitly requested.
-
-The **MTG** workspace is intentionally a placeholder for a future proxy-printing
-workflow.
+  linked or independent cut lines, and exact 554-dot roll generation. Printed
+  strips use one scale calculated from the tallest source strip, giving every
+  printed strip the same fitted feed length without trailing white padding.
+  Optional AI calculation is available only when explicitly requested.
+- MTG proxy composer: paste a decklist, resolve each card through Scryfall with
+  a target language, render the cards full-width at 554 dots with the same
+  threshold, dither, contrast, brightness, and sharpness controls as the image
+  editor, then stack them into a continuous roll. Rolls that are too long or
+  too large are split into printable batches automatically.
 
 ## Requirements
 
@@ -48,7 +52,7 @@ python3 -m venv .venv
 
 Open <http://127.0.0.1:8092>.
 
-The **COLIS** manual editor works without any API key. To enable its optional
+The **RESIZE** manual editor works without any API key. To enable its optional
 **Auto calcul** button, copy `.env.example` to `.env` and add an OpenRouter key.
 The configured model is `google/gemma-4-31b-it`. `.env` is ignored by Git and
 should remain mode `600` on shared machines.
@@ -136,6 +140,8 @@ additional layer. See [SECURITY.md](SECURITY.md).
 | `OPENROUTER_API_KEY` | empty | Enables vision-assisted parcel-label detection |
 | `OPENROUTER_MODEL` | `google/gemma-4-31b-it` | OpenRouter vision model slug |
 | `PORT` | `8092` | Development-server port |
+| `MTG_MAX_BATCH_HEIGHT` | `3000` | Max raster rows per MTG print lot (keeps each lot small enough for the S002 buffer) |
+| `MTG_MAX_BATCH_BYTES` | `200000` | Max encoded size per MTG print lot |
 
 ## Tests
 
@@ -154,6 +160,7 @@ command from regressions. Tests never connect to or print from the S002.
 ```text
 app.py                  Flask app, queue, API, and worker
 parcel.py               vision analysis, local validation, and strip tiling
+mtg.py                  Scryfall lookup and MTG card-roll preparation
 rendering.py            text/document rendering and image processing
 s002_protocol.py        CUS encoder and platform transports
 native/macos_rfcomm.m   native macOS RFCOMM helper
@@ -178,4 +185,7 @@ For implementation details, read [Architecture](docs/architecture.md) and
   **Auto calcul**.
 - The native macOS helper uses the deprecated IOBluetooth framework because the
   printer exposes Bluetooth Classic SPP rather than BLE.
-- The MTG proxy composer is not implemented yet.
+- The MTG composer resolves cards through the public Scryfall API. The
+  mtgdecks.net page is Cloudflare-blocked, so the app takes a pasted decklist
+  instead of scraping that site. Text/ASCII card output is planned but not yet
+  implemented.

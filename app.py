@@ -24,6 +24,21 @@ from parcel import (
     compose_manual_parcel,
     prepare_document,
 )
+from mtg import (
+    DEFAULT_LANG,
+    MAX_BATCH_BYTES,
+    MAX_BATCH_HEIGHT,
+    BatchInfo,
+    MtgDeck,
+    MtgError,
+    RenderedCard,
+    SUPPORTED_LANGS,
+    _estimated_bytes,
+    build_batches,
+    parse_decklist,
+    render_card_image,
+    resolve_deck,
+)
 from rendering import DITHER_PRESETS, render_text, render_upload
 from s002_protocol import encode_print_job, resolve_transport, send_print_job
 
@@ -32,6 +47,8 @@ load_dotenv(BASE_DIR / ".env")
 DATA_DIR = Path(os.environ.get("S002_DATA_DIR", BASE_DIR / "data"))
 JOBS_DIR = DATA_DIR / "jobs"
 PARCELS_DIR = DATA_DIR / "parcels"
+MTG_DIR = DATA_DIR / "mtg"
+MTG_CACHE_DIR = MTG_DIR / "cache"
 PRINTER_MAC = os.environ.get("S002_MAC", "06:03:86:00:97:AB")
 PRINTER_CHANNEL = int(os.environ.get("S002_CHANNEL", "1"))
 PRINTER_TRANSPORT = resolve_transport(os.environ.get("S002_TRANSPORT", "auto"))
@@ -45,9 +62,11 @@ BASIC_USER = os.environ.get("S002_WEB_USER", "")
 BASIC_PASSWORD = os.environ.get("S002_WEB_PASSWORD", "")
 MAX_HISTORY = 40
 MAX_PARCELS = 8
+MAX_MTG_DECKS = 8
 
 JOBS_DIR.mkdir(parents=True, exist_ok=True)
 PARCELS_DIR.mkdir(parents=True, exist_ok=True)
+MTG_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def clear_transient_files() -> None:
@@ -57,6 +76,10 @@ def clear_transient_files() -> None:
     for pattern in ("*-preview.png", "*-roll.png", "*-page.png", "*-source.*"):
         for path in PARCELS_DIR.glob(pattern):
             path.unlink(missing_ok=True)
+    for path in MTG_DIR.glob("*-card-*.png"):
+        path.unlink(missing_ok=True)
+    for path in MTG_DIR.glob("*-roll-*.png"):
+        path.unlink(missing_ok=True)
 
 
 clear_transient_files()
@@ -144,6 +167,27 @@ class ParcelDraft:
 
 parcel_drafts: OrderedDict[str, ParcelDraft] = OrderedDict()
 draft_lock = threading.Lock()
+
+
+mtg_decks: OrderedDict[str, MtgDeck] = OrderedDict()
+mtg_lock = threading.Lock()
+
+
+def clear_mtg_files(deck_id: str) -> None:
+    for path in MTG_DIR.glob(f"{deck_id}-*"):
+        path.unlink(missing_ok=True)
+
+
+def prune_mtg_decks() -> None:
+    with mtg_lock:
+        while len(mtg_decks) > MAX_MTG_DECKS:
+            old_id, _ = mtg_decks.popitem(last=False)
+            clear_mtg_files(old_id)
+
+
+def get_mtg_deck(deck_id: str) -> MtgDeck | None:
+    with mtg_lock:
+        return mtg_decks.get(deck_id)
 
 
 def save_parcel_draft(filename: str, content: bytes) -> ParcelDraft:
@@ -449,12 +493,162 @@ def print_parcel(parcel_id: str):
         job = save_job(
             image,
             label=f"{session.carrier} · {len(session.band_heights_mm)} bandes",
-            source="colis · mosaïque",
+            source="resize · mosaïque",
             density=density,
             threshold=128,
         )
         return jsonify(job.public()), 202
     except (RuntimeError, ValueError) as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+@app.post("/api/mtg/deck")
+def create_mtg_deck():
+    try:
+        payload = request.get_json(silent=True) or {}
+        deck_text = (payload.get("deck_text") or "").strip()
+        lang = (payload.get("lang") or DEFAULT_LANG).strip().lower()
+        if not deck_text:
+            raise MtgError("Collez la decklist pour commencer")
+        if lang not in SUPPORTED_LANGS:
+            raise MtgError("langue non prise en charge")
+        lines = parse_decklist(deck_text)
+        if not lines:
+            raise MtgError("aucune carte détectée dans la liste")
+        cards, missing = resolve_deck(lines, lang)
+        if not cards:
+            raise MtgError("aucune carte résolue via Scryfall")
+        deck_id = uuid.uuid4().hex[:12]
+        deck = MtgDeck(
+            id=deck_id,
+            lang=lang,
+            title="Deck MTG",
+            cards=cards,
+            missing=missing,
+            created_at=now_iso(),
+        )
+        with mtg_lock:
+            mtg_decks[deck_id] = deck
+        prune_mtg_decks()
+        return jsonify(deck.public()), 201
+    except (MtgError, RuntimeError, ValueError, OSError) as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+@app.post("/api/mtg/deck/<deck_id>/render")
+def render_mtg_deck(deck_id):
+    try:
+        deck = get_mtg_deck(deck_id)
+        if deck is None:
+            return jsonify({"error": "deck not found"}), 404
+        payload = request.get_json(silent=True) or {}
+        dither = payload.get("dither", "floyd")
+        if dither not in DITHER_PRESETS:
+            raise MtgError("trame d'impression inconnue")
+        contrast = int(payload.get("contrast", "100"))
+        brightness = int(payload.get("brightness", "100"))
+        sharpness = int(payload.get("sharpness", "100"))
+        if not 40 <= contrast <= 200:
+            raise MtgError("le contraste doit rester entre 40 et 200")
+        if not 40 <= brightness <= 160:
+            raise MtgError("la clarté doit rester entre 40 et 160")
+        if not 0 <= sharpness <= 250:
+            raise MtgError("la netteté doit rester entre 0 et 250")
+
+        clear_mtg_files(deck_id)
+        include = payload.get("include")
+        if include is not None:
+            include = {int(index) for index in include}
+        else:
+            include = set(range(len(deck.cards)))
+        selected = [card for index, card in enumerate(deck.cards) if index in include]
+        if not selected:
+            raise MtgError("aucune carte sélectionnée pour le rouleau")
+        rendered: list[tuple[object, object]] = []
+        gallery: list[RenderedCard] = []
+        for index, card in enumerate(deck.cards):
+            if index not in include:
+                continue
+            image = render_card_image(
+                card,
+                cache_dir=MTG_CACHE_DIR,
+                dither=dither,
+                contrast=contrast,
+                brightness=brightness,
+                sharpness=sharpness,
+            )
+            image.save(MTG_DIR / f"{deck_id}-card-{index}.png", format="PNG", optimize=True)
+            rendered.append((card, image))
+            gallery.append(RenderedCard(index=index, card=card, height=image.height, width=image.width))
+        batches = build_batches(rendered)
+        batch_infos = [
+            BatchInfo(index=index, height=batch.height, estimated_bytes=_estimated_bytes(batch.height))
+            for index, batch in enumerate(batches)
+        ]
+        for index, batch in enumerate(batches):
+            batch.save(MTG_DIR / f"{deck_id}-roll-{index}.png", format="PNG", optimize=True)
+        with mtg_lock:
+            deck.batches = batch_infos
+            deck.gallery = gallery
+        deck_info = deck.public()
+        deck_info["roll_height"] = sum(batch.height for batch in batches)
+        deck_info["max_batch_height"] = MAX_BATCH_HEIGHT
+        deck_info["max_batch_bytes"] = MAX_BATCH_BYTES
+        return jsonify(deck_info)
+    except (MtgError, RuntimeError, ValueError, OSError) as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+@app.get("/api/mtg/deck/<deck_id>/cards/<int:index>/preview")
+def mtg_card_preview(deck_id, index):
+    if get_mtg_deck(deck_id) is None:
+        return jsonify({"error": "deck not found"}), 404
+    path = MTG_DIR / f"{deck_id}-card-{index}.png"
+    if not path.is_file():
+        return jsonify({"error": "card preview not found"}), 404
+    response = send_file(path, mimetype="image/png", max_age=0)
+    response.headers["Cache-Control"] = "private, no-store"
+    return response
+
+
+@app.get("/api/mtg/deck/<deck_id>/batches/<int:index>/preview")
+def mtg_batch_preview(deck_id, index):
+    if get_mtg_deck(deck_id) is None:
+        return jsonify({"error": "deck not found"}), 404
+    path = MTG_DIR / f"{deck_id}-roll-{index}.png"
+    if not path.is_file():
+        return jsonify({"error": "batch preview not found"}), 404
+    response = send_file(path, mimetype="image/png", max_age=0)
+    response.headers["Cache-Control"] = "private, no-store"
+    return response
+
+
+@app.post("/api/mtg/deck/<deck_id>/print")
+def print_mtg_deck(deck_id):
+    try:
+        deck = get_mtg_deck(deck_id)
+        if deck is None:
+            return jsonify({"error": "deck not found"}), 404
+        if not deck.batches:
+            raise MtgError("préparer le rouleau avant d'imprimer")
+        density = int(request.form.get("density", "12"))
+        if density not in {7, 12, 15}:
+            raise ValueError("density must be light, medium, or dark")
+        job_ids: list[str] = []
+        for batch in deck.batches:
+            path = MTG_DIR / f"{deck_id}-roll-{batch.index}.png"
+            with Image.open(path) as source:
+                image = source.convert("L")
+            job = save_job(
+                image,
+                label=f"MTG · lot {batch.index + 1}/{len(deck.batches)}",
+                source="mtg · mosaïque",
+                density=density,
+                threshold=128,
+            )
+            job_ids.append(job.id)
+        return jsonify({"jobs": job_ids, "count": len(job_ids)}), 202
+    except (MtgError, RuntimeError, ValueError, OSError) as exc:
         return jsonify({"error": str(exc)}), 400
 
 

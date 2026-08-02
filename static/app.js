@@ -25,6 +25,7 @@ const manualContext = manualCanvas.getContext("2d");
 const manualError = document.querySelector("#manual-error");
 const manualCropSize = document.querySelector("#manual-crop-size");
 const manualBandReadout = document.querySelector("#manual-band-readout");
+const manualModeHint = document.querySelector("#manual-mode-hint");
 const manualLinked = document.querySelector("#manual-linked");
 const manualIndependent = document.querySelector("#manual-independent");
 const manualAddBand = document.querySelector("#manual-add-cut");
@@ -52,6 +53,7 @@ let manualCuts = [];
 let manualMoveMode = "linked";
 let activeManualCut = null;
 let manualDrag = null;
+let manualHoverTarget = null;
 
 textarea.addEventListener("input", () => { count.textContent = textarea.value.length; });
 
@@ -312,12 +314,59 @@ function normalizedCropPayload() {
 }
 
 function distributeManualBands(bandCount = manualCuts.length + 1) {
-  const safeBandCount = Math.max(1, Math.min(40, Math.round(bandCount)));
+  const safeBandCount = Math.max(1, Math.round(bandCount));
   manualCuts = Array.from(
     { length: safeBandCount - 1 },
     (_, index) => (index + 1) / safeBandCount,
   );
   activeManualCut = manualCuts.length ? Math.min(activeManualCut ?? 0, manualCuts.length - 1) : null;
+}
+
+function minimumManualGap() {
+  return Number.EPSILON * 16;
+}
+
+function repeatManualBandSpacing(referencePosition, referenceOrdinal) {
+  const spacing = referencePosition / referenceOrdinal;
+  const requestedCutCount = spacing > 0
+    ? Math.max(0, Math.ceil((1 - Number.EPSILON * 8) / spacing) - 1)
+    : manualCuts.length + 1;
+  // Throttle a single pointer event, without imposing a final band limit.
+  // Continued movement and the add button can grow the series indefinitely.
+  const cutCount = Math.min(requestedCutCount, manualCuts.length + 250);
+  const safeSpacing = Math.max(minimumManualGap(), spacing > 0 ? spacing : 1 / (cutCount + 1));
+  manualCuts = Array.from({ length: cutCount }, (_, index) => (index + 1) * safeSpacing);
+  activeManualCut = referenceOrdinal <= cutCount ? referenceOrdinal - 1 : null;
+}
+
+function addIndependentManualBand() {
+  const boundaries = [0, ...manualCuts, 1];
+  let largestIndex = 0;
+  for (let index = 1; index < boundaries.length - 1; index += 1) {
+    if (boundaries[index + 1] - boundaries[index] > boundaries[largestIndex + 1] - boundaries[largestIndex]) {
+      largestIndex = index;
+    }
+  }
+  const position = (boundaries[largestIndex] + boundaries[largestIndex + 1]) / 2;
+  manualCuts = [...manualCuts, position].sort((a, b) => a - b);
+  activeManualCut = manualCuts.indexOf(position);
+}
+
+function removeIndependentManualBand() {
+  if (!manualCuts.length) return;
+  const index = Math.min(activeManualCut ?? manualCuts.length - 1, manualCuts.length - 1);
+  manualCuts = manualCuts.filter((_, cutIndex) => cutIndex !== index);
+  activeManualCut = manualCuts.length ? Math.min(index, manualCuts.length - 1) : null;
+}
+
+function updateManualModeHint(dragging = false) {
+  if (manualMoveMode === "linked") {
+    manualModeHint.textContent = dragging
+      ? `Relâchez pour répartir ${manualCuts.length + 1} bandes à parts égales.`
+      : "Glissez une coupe : écartez les lignes pour retirer des bandes, rapprochez-les pour en ajouter.";
+  } else {
+    manualModeHint.textContent = "Chaque coupe est libre. Ajouter scinde la plus grande bande, enlever retire la coupe sélectionnée.";
+  }
 }
 
 function equalizeManualCuts() {
@@ -333,14 +382,20 @@ function updateManualReadout() {
   const heightMm = (manualCrop.y1 - manualCrop.y0) * parcelDraft.height_mm;
   const boundaries = [0, ...manualCuts, 1];
   const bands = boundaries.slice(0, -1).map((value, index) => (boundaries[index + 1] - value) * heightMm);
-  const invalid = bands.some((value) => value > 46.9 + .05);
+  const smallestBand = Math.min(...bands);
+  const largestBand = Math.max(...bands);
+  let bandDetails;
+  if (largestBand - smallestBand < .05) bandDetails = `${smallestBand.toFixed(1)} MM CHACUNE`;
+  else if (bands.length <= 8) bandDetails = `${bands.map((value) => value.toFixed(1)).join(" / ")} MM`;
+  else bandDetails = `${smallestBand.toFixed(1)}–${largestBand.toFixed(1)} MM`;
   manualCropSize.textContent = `${widthMm.toFixed(1)} × ${heightMm.toFixed(1)} MM`;
-  manualBandReadout.textContent = `${String(bands.length).padStart(2, "0")} BANDES · ${bands.map((value) => value.toFixed(1)).join(" / ")} MM`;
-  manualBandReadout.classList.toggle("invalid", invalid);
-  manualAddBand.disabled = bands.length >= 40;
+  manualBandReadout.textContent = `${String(bands.length).padStart(2, "0")} BANDES · ${bandDetails}`;
+  manualBandReadout.classList.remove("invalid");
   manualRemoveBand.disabled = bands.length <= 1;
-  parcelCompose.disabled = invalid;
-  parcelCompose.title = invalid ? "Une bande dépasse 46,9 mm" : "";
+  parcelCompose.disabled = false;
+  parcelCompose.title = largestBand > 46.9 + .05
+    ? "Les bandes seront réduites proportionnellement à la largeur de la S002"
+    : "";
 }
 
 function drawManualEditor() {
@@ -363,6 +418,15 @@ function drawManualEditor() {
   manualContext.lineWidth = Math.max(3, width / 420);
   manualContext.strokeRect(x0, y0, x1 - x0, y1 - y0);
 
+  const boundaries = [0, ...manualCuts, 1];
+  boundaries.slice(0, -1).forEach((position, index) => {
+    if (index % 2 === 0) return;
+    const bandY0 = y0 + position * (y1 - y0);
+    const bandY1 = y0 + boundaries[index + 1] * (y1 - y0);
+    manualContext.fillStyle = "rgba(3, 195, 204, .07)";
+    manualContext.fillRect(x0, bandY0, x1 - x0, bandY1 - bandY0);
+  });
+
   const handleSize = Math.max(12, width / 70);
   manualContext.fillStyle = "#ff7a21";
   [[x0, y0], [x1, y0], [x0, y1], [x1, y1]].forEach(([x, y]) => {
@@ -372,19 +436,34 @@ function drawManualEditor() {
   manualCuts.forEach((position, index) => {
     const y = y0 + position * (y1 - y0);
     const selected = index === activeManualCut;
-    manualContext.strokeStyle = selected ? "#ff7a21" : "#03c3cc";
-    manualContext.lineWidth = selected ? Math.max(5, width / 300) : Math.max(3, width / 430);
+    const hovered = manualHoverTarget?.type === "line" && manualHoverTarget.index === index;
+    const emphasized = selected || hovered;
+    manualContext.strokeStyle = selected ? "#ff7a21" : hovered ? "#f2f4f7" : "#03c3cc";
+    manualContext.lineWidth = emphasized ? Math.max(5, width / 300) : Math.max(3, width / 430);
     manualContext.beginPath();
     manualContext.moveTo(x0, y);
     manualContext.lineTo(x1, y);
     manualContext.stroke();
     const labelWidth = Math.max(58, width / 16);
     const labelHeight = Math.max(22, width / 52);
-    manualContext.fillStyle = selected ? "#ff7a21" : "#03c3cc";
+    manualContext.fillStyle = selected ? "#ff7a21" : hovered ? "#f2f4f7" : "#03c3cc";
     manualContext.fillRect(x0, y - labelHeight, labelWidth, labelHeight);
     manualContext.fillStyle = "#101216";
     manualContext.font = `700 ${Math.max(11, width / 105)}px monospace`;
-    manualContext.fillText(`CUT ${index + 1}`, x0 + 7, y - 7);
+    manualContext.fillText(`COUPE ${index + 1}`, x0 + 7, y - 7);
+
+    const gripWidth = Math.max(22, width / 48);
+    const gripHeight = Math.max(28, width / 38);
+    manualContext.fillStyle = selected ? "#ff7a21" : hovered ? "#f2f4f7" : "#03c3cc";
+    manualContext.fillRect(x1 - gripWidth / 2, y - gripHeight / 2, gripWidth, gripHeight);
+    manualContext.strokeStyle = "#101216";
+    manualContext.lineWidth = Math.max(2, width / 620);
+    [-1, 0, 1].forEach((offset) => {
+      manualContext.beginPath();
+      manualContext.moveTo(x1 - gripWidth / 4, y + offset * gripHeight / 5);
+      manualContext.lineTo(x1 + gripWidth / 4, y + offset * gripHeight / 5);
+      manualContext.stroke();
+    });
   });
   updateManualReadout();
 }
@@ -419,18 +498,28 @@ function manualHitTarget(point) {
   return null;
 }
 
+function manualTargetKey(target) {
+  if (!target) return "none";
+  return `${target.type}:${target.index ?? target.corner ?? ""}`;
+}
+
+function updateManualCanvasCursor(target) {
+  if (manualDrag?.type === "line" || target?.type === "line") manualCanvas.style.cursor = "ns-resize";
+  else if (manualDrag?.type === "crop" || target?.type === "crop") manualCanvas.style.cursor = "move";
+  else if (manualDrag?.type === "handle" || target?.type === "handle") {
+    const corner = manualDrag?.corner || target.corner;
+    manualCanvas.style.cursor = corner === "nw" || corner === "se" ? "nwse-resize" : "nesw-resize";
+  } else manualCanvas.style.cursor = "crosshair";
+}
+
 manualCanvas.addEventListener("pointerdown", (event) => {
   if (!parcelPageImage) return;
   const point = manualCanvasPoint(event);
   const target = manualHitTarget(point);
   if (!target) return;
   event.preventDefault();
+  manualCanvas.focus({ preventScroll: true });
   if (target.type === "line") activeManualCut = target.index;
-  if (target.type === "line" && manualMoveMode === "linked") {
-    distributeManualBands();
-    drawManualEditor();
-    return;
-  }
   manualCanvas.setPointerCapture(event.pointerId);
   manualDrag = {
     ...target,
@@ -438,12 +527,21 @@ manualCanvas.addEventListener("pointerdown", (event) => {
     crop: { ...manualCrop },
     cuts: [...manualCuts],
   };
+  updateManualCanvasCursor(target);
   drawManualEditor();
 });
 
 manualCanvas.addEventListener("pointermove", (event) => {
-  if (!manualDrag) return;
   const point = manualCanvasPoint(event);
+  if (!manualDrag) {
+    const target = manualHitTarget(point);
+    if (manualTargetKey(target) !== manualTargetKey(manualHoverTarget)) {
+      manualHoverTarget = target;
+      drawManualEditor();
+    }
+    updateManualCanvasCursor(target);
+    return;
+  }
   const dx = (point.x - manualDrag.start.x) / manualCanvas.width;
   const dy = (point.y - manualDrag.start.y) / manualCanvas.height;
   if (manualDrag.type === "crop") {
@@ -453,20 +551,27 @@ manualCanvas.addEventListener("pointermove", (event) => {
     const y0 = Math.max(0, Math.min(1 - height, manualDrag.crop.y0 + dy));
     manualCrop = { x0, y0, x1: x0 + width, y1: y0 + height };
   } else if (manualDrag.type === "handle") {
-    const minimum = .06;
+    const minimumX = minimumManualGap();
+    const minimumY = minimumManualGap();
     manualCrop = { ...manualDrag.crop };
-    if (manualDrag.corner.includes("w")) manualCrop.x0 = Math.max(0, Math.min(manualCrop.x1 - minimum, manualDrag.crop.x0 + dx));
-    if (manualDrag.corner.includes("e")) manualCrop.x1 = Math.min(1, Math.max(manualCrop.x0 + minimum, manualDrag.crop.x1 + dx));
-    if (manualDrag.corner.includes("n")) manualCrop.y0 = Math.max(0, Math.min(manualCrop.y1 - minimum, manualDrag.crop.y0 + dy));
-    if (manualDrag.corner.includes("s")) manualCrop.y1 = Math.min(1, Math.max(manualCrop.y0 + minimum, manualDrag.crop.y1 + dy));
+    if (manualDrag.corner.includes("w")) manualCrop.x0 = Math.max(0, Math.min(manualCrop.x1 - minimumX, manualDrag.crop.x0 + dx));
+    if (manualDrag.corner.includes("e")) manualCrop.x1 = Math.min(1, Math.max(manualCrop.x0 + minimumX, manualDrag.crop.x1 + dx));
+    if (manualDrag.corner.includes("n")) manualCrop.y0 = Math.max(0, Math.min(manualCrop.y1 - minimumY, manualDrag.crop.y0 + dy));
+    if (manualDrag.corner.includes("s")) manualCrop.y1 = Math.min(1, Math.max(manualCrop.y0 + minimumY, manualDrag.crop.y1 + dy));
   } else if (manualDrag.type === "line") {
     const cropHeight = (manualDrag.crop.y1 - manualDrag.crop.y0) * manualCanvas.height;
     const delta = (point.y - manualDrag.start.y) / cropHeight;
     const index = manualDrag.index;
-    const low = index ? manualDrag.cuts[index - 1] + .01 : .01;
-    const high = index < manualDrag.cuts.length - 1 ? manualDrag.cuts[index + 1] - .01 : .99;
-    manualCuts = [...manualDrag.cuts];
-    manualCuts[index] = Math.max(low, Math.min(high, manualDrag.cuts[index] + delta));
+    if (manualMoveMode === "linked") {
+      repeatManualBandSpacing(manualDrag.cuts[index] + delta, index + 1);
+      updateManualModeHint(true);
+    } else {
+      const minimum = minimumManualGap();
+      const low = index ? manualDrag.cuts[index - 1] + minimum : minimum;
+      const high = index < manualDrag.cuts.length - 1 ? manualDrag.cuts[index + 1] - minimum : 1 - minimum;
+      manualCuts = [...manualDrag.cuts];
+      manualCuts[index] = Math.max(low, Math.min(high, manualDrag.cuts[index] + delta));
+    }
   }
   if (manualMoveMode === "linked" && manualDrag.type !== "line") distributeManualBands();
   drawManualEditor();
@@ -474,10 +579,38 @@ manualCanvas.addEventListener("pointermove", (event) => {
 
 function endManualDrag(event) {
   if (manualDrag && manualCanvas.hasPointerCapture(event.pointerId)) manualCanvas.releasePointerCapture(event.pointerId);
+  if (manualDrag?.type === "line" && manualMoveMode === "linked") distributeManualBands(manualCuts.length + 1);
   manualDrag = null;
+  updateManualModeHint();
+  updateManualCanvasCursor(manualHoverTarget);
+  drawManualEditor();
 }
 manualCanvas.addEventListener("pointerup", endManualDrag);
 manualCanvas.addEventListener("pointercancel", endManualDrag);
+manualCanvas.addEventListener("pointerleave", () => {
+  if (manualDrag) return;
+  manualHoverTarget = null;
+  updateManualCanvasCursor(null);
+  drawManualEditor();
+});
+
+manualCanvas.addEventListener("keydown", (event) => {
+  if (!manualCuts.length || !["ArrowUp", "ArrowDown"].includes(event.key)) return;
+  event.preventDefault();
+  const direction = event.key === "ArrowUp" ? -1 : 1;
+  if (manualMoveMode === "linked") {
+    distributeManualBands(manualCuts.length + 1 - direction);
+  } else {
+    const index = Math.min(activeManualCut ?? 0, manualCuts.length - 1);
+    const step = event.shiftKey ? .025 : .005;
+    const minimum = minimumManualGap();
+    const low = index ? manualCuts[index - 1] + minimum : minimum;
+    const high = index < manualCuts.length - 1 ? manualCuts[index + 1] - minimum : 1 - minimum;
+    manualCuts[index] = Math.max(low, Math.min(high, manualCuts[index] + direction * step));
+    activeManualCut = index;
+  }
+  drawManualEditor();
+});
 
 function setManualCropPreset(name) {
   if (name === "right") manualCrop = { x0: .58, y0: .06, x1: .98, y1: .94 };
@@ -495,24 +628,34 @@ manualLinked.addEventListener("click", () => {
   manualMoveMode = "linked";
   manualLinked.classList.add("active");
   manualIndependent.classList.remove("active");
+  manualLinked.setAttribute("aria-pressed", "true");
+  manualIndependent.setAttribute("aria-pressed", "false");
   distributeManualBands();
+  updateManualModeHint();
   drawManualEditor();
 });
 manualIndependent.addEventListener("click", () => {
   manualMoveMode = "independent";
   manualIndependent.classList.add("active");
   manualLinked.classList.remove("active");
+  manualIndependent.setAttribute("aria-pressed", "true");
+  manualLinked.setAttribute("aria-pressed", "false");
+  updateManualModeHint();
+  drawManualEditor();
 });
 
 manualAddBand.addEventListener("click", () => {
-  distributeManualBands(manualCuts.length + 2);
-  activeManualCut = manualCuts.length ? manualCuts.length - 1 : null;
+  if (manualMoveMode === "linked") {
+    distributeManualBands(manualCuts.length + 2);
+    activeManualCut = manualCuts.length ? manualCuts.length - 1 : null;
+  } else addIndependentManualBand();
   drawManualEditor();
 });
 
 manualRemoveBand.addEventListener("click", () => {
   if (!manualCuts.length) return;
-  distributeManualBands(manualCuts.length);
+  if (manualMoveMode === "linked") distributeManualBands(manualCuts.length);
+  else removeIndependentManualBand();
   drawManualEditor();
 });
 
@@ -582,7 +725,7 @@ function presentParcel(result) {
   const rollMillimeters = Math.round(result.roll_height / 300 * 25.4);
   document.querySelector("#parcel-roll-length").textContent = `${rollMillimeters} mm`;
   document.querySelector("#parcel-side").textContent = result.document_side === "custom" ? "ZONE PERSONNALISÉE" : `ZONE ${result.document_side.toUpperCase()}`;
-  document.querySelector("#parcel-preview-size").textContent = `${result.band_count} BANDES · 300 DPI`;
+  document.querySelector("#parcel-preview-size").textContent = `554 DOTS · ${result.band_count} BANDES`;
   document.querySelector("#parcel-notes").textContent = result.notes || "Cadre et coupes préparés manuellement.";
   const bandList = document.querySelector("#parcel-band-list");
   bandList.replaceChildren(...result.band_heights_mm.map((height, index) => {
@@ -590,7 +733,7 @@ function presentParcel(result) {
     chip.textContent = `${String(index + 1).padStart(2, "0")} · ${height} MM`;
     return chip;
   }));
-  parcelPreview.src = `${result.preview_url}?v=${Date.now()}`;
+  parcelPreview.src = `${result.roll_url}?v=${Date.now()}`;
   parcelResult.classList.remove("hidden");
   parcelResult.scrollIntoView({ behavior: "smooth", block: "start" });
 }
@@ -743,3 +886,307 @@ form.addEventListener("submit", async (event) => {
 
 refreshHealth();
 schedulePoll();
+
+/* ------------------------------------------------------------------ *
+ * MTG proxy composer
+ * ------------------------------------------------------------------ */
+const mtgForm = document.querySelector("#mtg-form");
+const mtgDeckText = document.querySelector("#mtg-deck-text");
+const mtgLang = document.querySelector("#mtg-lang");
+const mtgAnalyze = document.querySelector("#mtg-analyze");
+const mtgAnalyzeError = document.querySelector("#mtg-analyze-error");
+const mtgAnalyzeState = document.querySelector("#mtg-analyze-state");
+const mtgMissing = document.querySelector("#mtg-missing");
+const mtgLive = document.querySelector("#mtg-live");
+const mtgLiveStrip = document.querySelector("#mtg-live-strip");
+const mtgRenderButton = document.querySelector("#mtg-render-button");
+const mtgRenderError = document.querySelector("#mtg-render-error");
+const mtgRenderState = document.querySelector("#mtg-render-state");
+const mtgRollPreview = document.querySelector("#mtg-roll-preview");
+const mtgPrint = document.querySelector("#mtg-print");
+const mtgPrintSize = document.querySelector("#mtg-print-size");
+const mtgPrintButton = document.querySelector("#mtg-print-button");
+const mtgPrintError = document.querySelector("#mtg-print-error");
+const mtgPrintState = document.querySelector("#mtg-print-state");
+
+let mtgDeck = null;
+let mtgLiveCards = []; // [{ canvas, image, frame }]
+
+mtgForm.addEventListener("submit", (event) => event.preventDefault());
+
+function mtgSetState(panelError, panelState, message) {
+  if (panelError) panelError.textContent = "";
+  if (panelState) panelState.textContent = message || "";
+}
+
+/* --- live thermal preview shared with the backend card renderer --- */
+function mtgCardFrame(image) {
+  const scale = Math.min(1, 554 / image.naturalWidth);
+  const width = Math.max(1, Math.round(image.naturalWidth * scale));
+  const height = Math.max(1, Math.round(image.naturalHeight * scale));
+  const off = document.createElement("canvas");
+  off.width = width;
+  off.height = height;
+  const octx = off.getContext("2d", { willReadFrequently: true });
+  octx.fillStyle = "#fff";
+  octx.fillRect(0, 0, width, height);
+  octx.drawImage(image, 0, 0, width, height);
+  const frame = octx.getImageData(0, 0, width, height);
+  const values = new Float32Array(width * height);
+  let low = 255;
+  let high = 0;
+  for (let index = 0; index < values.length; index += 1) {
+    const offset = index * 4;
+    const gray = frame.data[offset] * .299 + frame.data[offset + 1] * .587 + frame.data[offset + 2] * .114;
+    values[index] = gray;
+    low = Math.min(low, gray);
+    high = Math.max(high, gray);
+  }
+  const span = Math.max(1, high - low);
+  for (let index = 0; index < values.length; index += 1) {
+    values[index] = (values[index] - low) * 255 / span;
+  }
+  return { values, width, height };
+}
+
+function mtgAdjustedValues(frame) {
+  const brightness = Number(document.querySelector("#mtg-brightness").value) / 100;
+  const contrast = Number(document.querySelector("#mtg-contrast").value) / 100;
+  const sharpness = Number(document.querySelector("#mtg-sharpness").value) / 100;
+  const values = Float32Array.from(frame.values, (value) => Math.max(0, Math.min(255, value * brightness)));
+  let mean = 0;
+  values.forEach((value) => { mean += value; });
+  mean /= values.length;
+  for (let index = 0; index < values.length; index += 1) {
+    values[index] = Math.max(0, Math.min(255, mean + (values[index] - mean) * contrast));
+  }
+  if (sharpness === 1) return values;
+  const original = new Float32Array(values);
+  const { width, height } = frame;
+  for (let y = 1; y < height - 1; y += 1) {
+    for (let x = 1; x < width - 1; x += 1) {
+      const index = y * width + x;
+      let weighted = original[index] * 5;
+      for (let dy = -1; dy <= 1; dy += 1) {
+        for (let dx = -1; dx <= 1; dx += 1) {
+          if (dx !== 0 || dy !== 0) weighted += original[(y + dy) * width + x + dx];
+        }
+      }
+      const smooth = weighted / 13;
+      values[index] = Math.max(0, Math.min(255, smooth + (original[index] - smooth) * sharpness));
+    }
+  }
+  return values;
+}
+
+function mtgPaintCard(canvas, frame, pixels) {
+  canvas.width = frame.width;
+  canvas.height = frame.height;
+  const context = canvas.getContext("2d");
+  context.fillStyle = "#fff";
+  context.fillRect(0, 0, canvas.width, canvas.height);
+  const imageData = context.createImageData(frame.width, frame.height);
+  pixels.forEach((value, index) => {
+    const offset = index * 4;
+    imageData.data[offset] = value;
+    imageData.data[offset + 1] = value;
+    imageData.data[offset + 2] = value;
+    imageData.data[offset + 3] = 255;
+  });
+  context.putImageData(imageData, 0, 0);
+}
+
+function mtgLiveRefresh() {
+  if (!mtgDeck || !mtgLiveCards.length) return;
+  const preset = document.querySelector('input[name="mtg-dither"]:checked').value;
+  mtgLiveCards.forEach((item) => {
+    const pixels = ditherPixels(
+      mtgAdjustedValues(item.frame),
+      item.frame.width,
+      item.frame.height,
+      preset,
+    );
+    mtgPaintCard(item.canvas, item.frame, pixels);
+  });
+}
+
+async function mtgBuildLiveStrip() {
+  mtgLiveCards = [];
+  const cards = mtgDeck.cards;
+  const count = Math.min(3, cards.length);
+  const indexes = [...cards.keys()].sort(() => Math.random() - 0.5).slice(0, count);
+  const strip = document.createElement("div");
+  strip.className = "mtg-live-strip-inner";
+  const loaded = [];
+  await Promise.all(indexes.map((index) => new Promise((resolve) => {
+    const image = new Image();
+    image.crossOrigin = "anonymous";
+    image.onload = () => {
+      loaded.push({ index, image });
+      resolve();
+    };
+    image.onerror = resolve;
+    image.src = cards[index].image_url;
+  })));
+  loaded.forEach(({ index, image }) => {
+    const card = cards[index];
+    const figure = document.createElement("figure");
+    figure.className = "mtg-live-card";
+    const canvas = document.createElement("canvas");
+    const caption = document.createElement("figcaption");
+    caption.textContent = `${card.resolved_name || card.requested_name} ×${card.qty}`;
+    figure.appendChild(canvas);
+    figure.appendChild(caption);
+    strip.appendChild(figure);
+    mtgLiveCards.push({ canvas, image, frame: mtgCardFrame(image) });
+  });
+  mtgLiveStrip.replaceChildren(strip);
+  mtgLiveRefresh();
+}
+
+document.querySelectorAll('input[name="mtg-dither"]').forEach((input) => {
+  input.addEventListener("change", () => {
+    document.querySelectorAll("#mtg-live .dither-card").forEach((card) => {
+      card.classList.toggle("selected", card.contains(input));
+    });
+    mtgLiveRefresh();
+  });
+});
+document.querySelectorAll("#mtg-live .range-control input[type='range']").forEach((input) => {
+  input.addEventListener("input", () => {
+    document.querySelector(`#mtg-live output[for="${input.id}"]`).value = input.value;
+    mtgLiveRefresh();
+  });
+});
+
+async function mtgAnalyzeClick() {
+  mtgSetState(mtgAnalyzeError, mtgAnalyzeState, "");
+  const deckText = mtgDeckText.value.trim();
+  if (!deckText) {
+    mtgAnalyzeError.textContent = "Collez la decklist pour commencer.";
+    return;
+  }
+  mtgAnalyze.disabled = true;
+  mtgAnalyzeState.textContent = "Résolution des cartes via Scryfall…";
+  try {
+    const response = await fetch("/api/mtg/deck", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ deck_text: deckText, lang: mtgLang.value }),
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || "Impossible d’analyser la liste");
+    mtgDeck = result;
+    document.querySelector("#mtg-title-label").textContent = result.title || "Deck MTG";
+    mtgMissing.textContent = result.missing.length
+      ? `Non résolues : ${result.missing.map((item) => `${item.name} ×${item.qty}`).join(" · ")}`
+      : "";
+    await mtgBuildLiveStrip();
+    mtgLive.classList.remove("hidden");
+    mtgPrint.classList.add("hidden");
+    mtgRollPreview.replaceChildren();
+    mtgPrintSize.textContent = "—";
+    mtgAnalyzeState.textContent = "Prévisualisez 3 cartes témoins, puis réglez la trame.";
+    mtgLive.scrollIntoView({ behavior: "smooth", block: "start" });
+  } catch (error) {
+    mtgAnalyzeError.textContent = error.message;
+  } finally {
+    mtgAnalyze.disabled = false;
+  }
+}
+mtgAnalyze.addEventListener("click", mtgAnalyzeClick);
+
+function mtgRenderRollPreview(deck) {
+  const rows = deck.batches.map((batch) => {
+    const row = document.createElement("div");
+    row.className = "mtg-roll-batch";
+    const head = document.createElement("div");
+    head.className = "preview-head";
+    head.innerHTML = `
+      <div>
+        <span class="tab-index">LOT ${String(batch.index + 1).padStart(2, "0")}</span>
+        <strong>${batch.height} rangées</strong>
+      </div>
+      <span>${(batch.estimated_bytes / 1024).toFixed(0)} KiB</span>`;
+    const img = document.createElement("img");
+    img.src = `/api/mtg/deck/${deck.id}/batches/${batch.index}/preview`;
+    img.alt = `lot ${batch.index + 1}`;
+    row.appendChild(head);
+    row.appendChild(img);
+    return row;
+  });
+  mtgRollPreview.replaceChildren(...rows);
+}
+
+async function mtgRenderClick() {
+  mtgSetState(mtgRenderError, null, "");
+  if (!mtgDeck) {
+    mtgRenderError.textContent = "Analysez la liste avant de préparer le rouleau.";
+    return;
+  }
+  const dither = document.querySelector('input[name="mtg-dither"]:checked').value;
+  const include = mtgDeck.cards.map((_, index) => index);
+  mtgRenderButton.disabled = true;
+  mtgRenderButton.querySelector("span:first-child").textContent = "Génération du rouleau…";
+  try {
+    const response = await fetch(`/api/mtg/deck/${mtgDeck.id}/render`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        dither,
+        include,
+        contrast: Number(document.querySelector("#mtg-contrast").value),
+        brightness: Number(document.querySelector("#mtg-brightness").value),
+        sharpness: Number(document.querySelector("#mtg-sharpness").value),
+      }),
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || "Impossible de générer le rouleau");
+    mtgDeck = result;
+    mtgRenderRollPreview(result);
+    const rollMm = Math.round(result.roll_height / 300 * 25.4);
+    document.querySelector("#mtg-metric-cards").textContent = String(result.printable_copies);
+    document.querySelector("#mtg-metric-lang").textContent = result.lang.toUpperCase();
+    document.querySelector("#mtg-metric-batches").textContent = String(result.batches.length);
+    document.querySelector("#mtg-metric-roll").textContent = `${rollMm} mm`;
+    document.querySelector("#mtg-notes").textContent = result.batches.length > 1
+      ? `Le rouleau est découpé en ${result.batches.length} lots (max ${result.max_batch_height} rangées).`
+      : "Rouleau continu unique, aucune découpe nécessaire.";
+    mtgPrintSize.textContent = `${result.roll_height} rangées · ${result.batches.length} lot${result.batches.length > 1 ? "s" : ""}`;
+    mtgPrint.classList.remove("hidden");
+    mtgPrint.scrollIntoView({ behavior: "smooth", block: "start" });
+  } catch (error) {
+    mtgRenderError.textContent = error.message;
+  } finally {
+    mtgRenderButton.disabled = false;
+    mtgRenderButton.querySelector("span:first-child").textContent = "Préparer le rouleau";
+  }
+}
+mtgRenderButton.addEventListener("click", mtgRenderClick);
+
+mtgPrintButton.addEventListener("click", async () => {
+  mtgSetState(mtgPrintError, mtgPrintState, "");
+  if (!mtgDeck || mtgDeck.batches.length === 0) {
+    mtgPrintError.textContent = "Préparez le rouleau avant d’imprimer.";
+    return;
+  }
+  mtgPrintButton.disabled = true;
+  mtgPrintButton.querySelector("span:first-child").textContent = "Mise en file des lots…";
+  try {
+    const data = new FormData();
+    data.set("density", document.querySelector("#mtg-density").value);
+    const response = await fetch(`/api/mtg/deck/${mtgDeck.id}/print`, { method: "POST", body: data });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || "Impossible de lancer l’impression");
+    currentJobId = result.jobs[result.jobs.length - 1] || null;
+    currentJobStateTarget = mtgPrintState;
+    currentJobErrorTarget = mtgPrintError;
+    mtgPrintState.textContent = `${result.count} lot${result.count > 1 ? "s" : ""} en file d’impression`;
+    await refreshHealth();
+  } catch (error) {
+    mtgPrintError.textContent = error.message;
+  } finally {
+    mtgPrintButton.disabled = false;
+    mtgPrintButton.querySelector("span:first-child").textContent = "Imprimer les lots";
+  }
+});
