@@ -119,6 +119,52 @@ Always set `S002_WEB_USER` and `S002_WEB_PASSWORD` in the service environment.
 For a public deployment, protect the hostname with Cloudflare Access as an
 additional layer. See [SECURITY.md](SECURITY.md).
 
+## Agent API
+
+Besides the interactive flows the web interface drives, three endpoints exist
+for programmatic clients such as the Hermes agent. They take JSON, return `202`
+with the job record, and feed the same single print queue as the interface.
+
+```bash
+curl -sS http://127.0.0.1:8092/api/print/text \
+  -H "Authorization: Bearer $S002_API_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"text": "Bonjour", "align": "center", "density": "dark"}'
+```
+
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/api/print/text` | Unicode text; `text`, `align` |
+| `POST` | `/api/print/markdown` | Markdown; `markdown` (or `text`) |
+| `POST` | `/api/print/image` | `image_base64`, a `path`, or a multipart `file` |
+| `GET` | `/api/status` | Queue depth, busy flag, last job |
+| `GET` | `/api/spec` | Machine-readable endpoint list for agent discovery |
+
+Shared options: `density` (`light`/`medium`/`dark`, or `7`/`12`/`15`),
+`threshold` (`1`–`254`), `font_size` (`14`–`72`), and `label`.
+`/api/print/image` additionally accepts `dither`, `contrast`, `brightness`, and
+`sharpness` with the same ranges the interface uses, and renders PDF, TXT, and
+Markdown when `filename` carries the matching suffix.
+
+Printing by `path` is restricted to the roots in `S002_ALLOWED_PATHS`; the
+systemd unit runs with `ProtectHome=true`, so home directories are unreachable
+regardless. Sending `image_base64` avoids the question entirely.
+
+Set `S002_API_TOKEN` to enable bearer authentication. Browsers keep using HTTP
+Basic, and either credential alone is accepted, so the interface and an agent
+share one service:
+
+```bash
+openssl rand -hex 32 > ~/.s002-api-token
+chmod 600 ~/.s002-api-token
+sudo sh -c "echo S002_API_TOKEN=$(cat ~/.s002-api-token) >> /etc/s002-web.env"
+sudo systemctl restart s002-web
+```
+
+The markdown renderer covers ATX headings, bullet and ordered lists with one
+nesting level, fenced code, blockquotes, horizontal rules, and inline code,
+bold, emphasis, and links. Tables and image syntax fall through as paragraphs.
+
 ## Configuration
 
 | Variable | Default | Purpose |
@@ -134,8 +180,14 @@ additional layer. See [SECURITY.md](SECURITY.md).
 | `S002_RFCOMM_CHUNK_DELAY` | `0` | Native macOS pacing; keep at zero for continuous output |
 | `S002_DATA_DIR` | `./data` | Runtime preview and transient job directory |
 | `S002_FONT_PATH` | auto-detected | Unicode TrueType font |
+| `S002_FONT_BOLD_PATH` | auto-detected | Bold face used by the markdown renderer |
+| `S002_FONT_MONO_PATH` | auto-detected | Monospace face used for markdown code |
+| `S002_FONT_MONO_BOLD_PATH` | auto-detected | Bold monospace face |
 | `S002_WEB_USER` | empty | Optional HTTP Basic username |
 | `S002_WEB_PASSWORD` | empty | Enables HTTP Basic authentication when non-empty |
+| `S002_API_TOKEN` | empty | Enables `Authorization: Bearer` and `X-API-Key` |
+| `S002_ALLOWED_PATHS` | `$S002_DATA_DIR/inbox` | Colon-separated roots printable by `path` |
+| `S002_PRINTING` | `1` | Set to `0` to queue without touching Bluetooth; used by the tests |
 | `OPENROUTER_API_KEY` | empty | Enables vision-assisted parcel-label detection |
 | `OPENROUTER_MODEL` | `google/gemma-4-31b-it` | OpenRouter vision model slug |
 | `PORT` | `8092` | Development-server port |

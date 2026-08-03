@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import hmac
 import os
 import threading
@@ -41,7 +43,7 @@ from mtg import (
     render_card_image,
     resolve_deck,
 )
-from rendering import DITHER_PRESETS, render_text, render_upload
+from rendering import DITHER_PRESETS, render_markdown, render_text, render_upload
 from s002_protocol import encode_print_job, resolve_transport, send_print_job
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -62,13 +64,30 @@ RFCOMM_CHUNK_SIZE = int(os.environ.get("S002_RFCOMM_CHUNK_SIZE", "0"))
 RFCOMM_CHUNK_DELAY = float(os.environ.get("S002_RFCOMM_CHUNK_DELAY", "0"))
 BASIC_USER = os.environ.get("S002_WEB_USER", "")
 BASIC_PASSWORD = os.environ.get("S002_WEB_PASSWORD", "")
+API_TOKEN = os.environ.get("S002_API_TOKEN", "")
+PRINTING_ENABLED = os.environ.get("S002_PRINTING", "1") != "0"
 MAX_HISTORY = 40
 MAX_PARCELS = 8
 MAX_MTG_DECKS = 8
+MAX_UPLOAD_BYTES = 16 * 1024 * 1024
+
+# Agents name densities; the printer wants the raw vendor values.
+DENSITY_NAMES = {"light": 7, "medium": 12, "normal": 12, "dark": 15}
+
+# Files printable by path. The unit runs with systemd's ProtectHome=true, so
+# home directories stay unreachable no matter what this allowlist says.
+ALLOWED_PATHS = tuple(
+    Path(entry).expanduser().resolve()
+    for entry in os.environ.get("S002_ALLOWED_PATHS", str(DATA_DIR / "inbox")).split(":")
+    if entry.strip()
+)
 
 JOBS_DIR.mkdir(parents=True, exist_ok=True)
 PARCELS_DIR.mkdir(parents=True, exist_ok=True)
 MTG_DIR.mkdir(parents=True, exist_ok=True)
+for _allowed_root in ALLOWED_PATHS:
+    if _allowed_root == DATA_DIR or DATA_DIR in _allowed_root.parents:
+        _allowed_root.mkdir(parents=True, exist_ok=True)
 
 
 def clear_transient_files() -> None:
@@ -329,22 +348,44 @@ def print_worker() -> None:
             print_queue.task_done()
 
 
-threading.Thread(target=print_worker, name="s002-print-worker", daemon=True).start()
+if PRINTING_ENABLED:
+    threading.Thread(target=print_worker, name="s002-print-worker", daemon=True).start()
 
 
-@app.before_request
-def require_basic_auth():
-    """Optional defense-in-depth in addition to Cloudflare Access."""
-    if not BASIC_PASSWORD:
-        return None
+def _token_matches() -> bool:
+    header = request.headers.get("Authorization", "")
+    if header[:7].lower() == "bearer ":
+        return hmac.compare_digest(header[7:].strip(), API_TOKEN)
+    supplied = request.headers.get("X-API-Key", "")
+    return bool(supplied) and hmac.compare_digest(supplied, API_TOKEN)
+
+
+def _basic_matches() -> bool:
     auth = request.authorization
-    valid = (
+    return (
         auth is not None
+        and auth.type == "basic"
         and hmac.compare_digest(auth.username or "", BASIC_USER)
         and hmac.compare_digest(auth.password or "", BASIC_PASSWORD)
     )
-    if valid:
+
+
+@app.before_request
+def require_auth():
+    """Optional defense-in-depth in addition to Cloudflare Access.
+
+    Browsers authenticate with HTTP Basic; API clients such as Hermes send a
+    bearer token. Either credential alone is sufficient, so the interface and
+    the agent share one service and one print queue.
+    """
+    if not BASIC_PASSWORD and not API_TOKEN:
         return None
+    if API_TOKEN and _token_matches():
+        return None
+    if BASIC_PASSWORD and _basic_matches():
+        return None
+    if not BASIC_PASSWORD:
+        return jsonify({"error": "a valid bearer token is required"}), 401
     return ("Authentication required", 401, {"WWW-Authenticate": 'Basic realm="Ink 002"'})
 
 
@@ -700,6 +741,253 @@ def print_mtg_deck(deck_id):
             job_ids.append(job.id)
         return jsonify({"jobs": job_ids, "count": len(job_ids)}), 202
     except (MtgError, RuntimeError, ValueError, OSError) as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+@app.get("/api/status")
+def status():
+    """Queue summary for agents deciding whether to send another job."""
+    with jobs_lock:
+        history = list(jobs.values())
+        queued = sum(job.status == "queued" for job in history)
+        printing = sum(job.status == "printing" for job in history)
+        last = history[-1].public() if history else None
+    return jsonify(
+        {
+            "ok": True,
+            "printer": "S002",
+            "mac": PRINTER_MAC,
+            "transport": PRINTER_TRANSPORT,
+            "printing_enabled": PRINTING_ENABLED,
+            "queued": queued,
+            "printing": printing,
+            "busy": bool(queued or printing),
+            "history_size": len(history),
+            "last_job": last,
+        }
+    )
+
+
+@app.get("/api/spec")
+def spec():
+    """Machine-readable endpoint list so an agent can discover the print API."""
+    allowed = ", ".join(str(path) for path in ALLOWED_PATHS) or "(none configured)"
+    return jsonify(
+        {
+            "name": "ink-002",
+            "description": "Print to the Snap & Tag S002 thermal printer (554-dot roll).",
+            "auth": "Authorization: Bearer <S002_API_TOKEN>",
+            "shared_options": {
+                "density": "light | medium | dark (default medium)",
+                "threshold": "1-254 black/white cutoff (default 85)",
+                "font_size": "14-72 (default 32)",
+                "label": "optional name shown in the job history",
+            },
+            "endpoints": [
+                {
+                    "method": "POST",
+                    "path": "/api/print/text",
+                    "body": {"text": "required", "align": "left | center | right"},
+                },
+                {
+                    "method": "POST",
+                    "path": "/api/print/markdown",
+                    "body": {"markdown": "required"},
+                },
+                {
+                    "method": "POST",
+                    "path": "/api/print/image",
+                    "body": {
+                        "image_base64": "base64 PNG/JPEG/WebP/BMP/GIF/TIFF/PDF/TXT/MD",
+                        "path": f"or a file under: {allowed}",
+                        "filename": "names the format when sending base64",
+                        "dither": f"one of {sorted(DITHER_PRESETS)} (default floyd)",
+                        "contrast": "40-200 (default 100)",
+                        "brightness": "40-160 (default 100)",
+                        "sharpness": "0-250 (default 100)",
+                    },
+                },
+                {"method": "GET", "path": "/api/status", "body": None},
+                {"method": "GET", "path": "/api/jobs", "body": None},
+                {"method": "GET", "path": "/api/jobs/<id>", "body": None},
+            ],
+        }
+    )
+
+
+def read_params() -> dict:
+    """Accept a JSON body from API clients or a form post from the web UI."""
+    if request.is_json:
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            raise ValueError("the JSON body must be an object")
+        return payload
+    return request.form.to_dict()
+
+
+def parse_int(params: dict, name: str, default: int, low: int, high: int) -> int:
+    raw = params.get(name, default)
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        raise ValueError(f"{name} must be a whole number") from None
+    if not low <= value <= high:
+        raise ValueError(f"{name} must be between {low} and {high}")
+    return value
+
+
+def parse_density(params: dict) -> int:
+    raw = params.get("density", "medium")
+    if isinstance(raw, str):
+        named = DENSITY_NAMES.get(raw.strip().lower())
+        if named is not None:
+            return named
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        raise ValueError("density must be light, medium, or dark") from None
+    if value not in {7, 12, 15}:
+        raise ValueError("density must be light, medium, or dark")
+    return value
+
+
+def parse_common(params: dict) -> dict:
+    return {
+        "density": parse_density(params),
+        "threshold": parse_int(params, "threshold", 85, 1, 254),
+    }
+
+
+def parse_image_options(params: dict) -> dict:
+    dither = str(params.get("dither", "floyd"))
+    if dither not in DITHER_PRESETS:
+        raise ValueError(f"dither must be one of {sorted(DITHER_PRESETS)}")
+    return {
+        "dither": dither,
+        "contrast": parse_int(params, "contrast", 100, 40, 200),
+        "brightness": parse_int(params, "brightness", 100, 40, 160),
+        "sharpness": parse_int(params, "sharpness", 100, 0, 250),
+    }
+
+
+def decode_base64(value: str) -> bytes:
+    """Decode a base64 payload, tolerating a data: URI wrapper."""
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("the base64 payload is empty")
+    cleaned = value.strip()
+    if cleaned.startswith("data:"):
+        _, _, cleaned = cleaned.partition(",")
+    try:
+        blob = base64.b64decode(cleaned, validate=False)
+    except (binascii.Error, ValueError):
+        raise ValueError("the base64 payload could not be decoded") from None
+    if not blob:
+        raise ValueError("the base64 payload is empty")
+    if len(blob) > MAX_UPLOAD_BYTES:
+        raise ValueError("decoded payloads are limited to 16 MB")
+    return blob
+
+
+def resolve_allowed_path(raw: str) -> Path:
+    candidate = Path(raw).expanduser().resolve()
+    if not any(candidate == root or root in candidate.parents for root in ALLOWED_PATHS):
+        allowed = ", ".join(str(root) for root in ALLOWED_PATHS) or "(none configured)"
+        raise ValueError(f"path is outside the allowed print directories: {allowed}")
+    if not candidate.is_file():
+        raise ValueError(f"no such file: {candidate}")
+    if candidate.stat().st_size > MAX_UPLOAD_BYTES:
+        raise ValueError("files are limited to 16 MB")
+    return candidate
+
+
+@app.post("/api/print/text")
+def print_text():
+    """Queue plain Unicode text. Body: {"text": "...", "align": "center"}."""
+    try:
+        params = read_params()
+        text = params.get("text", "")
+        if not isinstance(text, str):
+            raise ValueError("text must be a string")
+        image = render_text(
+            text,
+            font_size=parse_int(params, "font_size", 32, 14, 72),
+            align=str(params.get("align", "left")),
+        )
+        first_line = next((line.strip() for line in text.splitlines() if line.strip()), "Text")
+        job = save_job(
+            image,
+            label=str(params.get("label") or first_line),
+            source="text",
+            **parse_common(params),
+        )
+        return jsonify(job.public()), 202
+    except (RuntimeError, ValueError) as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+@app.post("/api/print/markdown")
+def print_markdown():
+    """Queue markdown rendered with headings, lists, quotes, and code blocks."""
+    try:
+        params = read_params()
+        markdown = params.get("markdown", params.get("text", ""))
+        if not isinstance(markdown, str):
+            raise ValueError("markdown must be a string")
+        image = render_markdown(markdown, font_size=parse_int(params, "font_size", 32, 14, 72))
+        heading = next(
+            (line.strip().lstrip("#").strip() for line in markdown.splitlines() if line.strip()),
+            "Markdown",
+        )
+        job = save_job(
+            image,
+            label=str(params.get("label") or heading),
+            source="markdown",
+            **parse_common(params),
+        )
+        return jsonify(job.public()), 202
+    except (RuntimeError, ValueError) as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+@app.post("/api/print/image")
+def print_image():
+    """Queue an image, PDF, TXT, or MD payload.
+
+    Accepts a multipart ``file`` upload, ``{"image_base64": ...}``, or
+    ``{"path": ...}`` pointing inside an allowed directory.
+    """
+    try:
+        params = read_params()
+        upload = request.files.get("file")
+        if upload and upload.filename:
+            filename = upload.filename
+            stream = upload.stream
+        elif params.get("path"):
+            resolved = resolve_allowed_path(str(params["path"]))
+            filename = str(params.get("filename") or resolved.name)
+            stream = BytesIO(resolved.read_bytes())
+        else:
+            encoded = params.get("image_base64") or params.get("content_base64")
+            if not encoded:
+                raise ValueError("provide a file upload, image_base64, or path")
+            filename = str(params.get("filename") or "upload.png")
+            stream = BytesIO(decode_base64(str(encoded)))
+        image_options = parse_image_options(params)
+        image = render_upload(
+            filename,
+            stream,
+            font_size=parse_int(params, "font_size", 32, 14, 72),
+            **image_options,
+        )
+        job = save_job(
+            image,
+            label=str(params.get("label") or filename),
+            source=f"image · {image_options['dither']}",
+            dither=image_options["dither"],
+            **parse_common(params),
+        )
+        return jsonify(job.public()), 202
+    except (RuntimeError, ValueError, OSError) as exc:
         return jsonify({"error": str(exc)}), 400
 
 

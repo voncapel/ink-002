@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import os
+import re
+from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import BinaryIO
 
@@ -14,6 +17,34 @@ MAX_HEIGHT = 30_000
 DEFAULT_MARGIN = 18
 SUPPORTED_IMAGES = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tif", ".tiff"}
 DITHER_PRESETS = {"threshold", "floyd", "atkinson", "bayer4", "bayer8"}
+
+# Markdown needs weight and a monospace face. Each variant falls back to the
+# regular Unicode font, so a slim font package still renders — just flatter.
+FONT_VARIANTS = {
+    "bold": (
+        "S002_FONT_BOLD_PATH",
+        (
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+            "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
+            "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+        ),
+    ),
+    "mono": (
+        "S002_FONT_MONO_PATH",
+        (
+            "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+            "/usr/share/fonts/truetype/noto/NotoSansMono-Regular.ttf",
+            "/System/Library/Fonts/Menlo.ttc",
+        ),
+    ),
+    "mono_bold": (
+        "S002_FONT_MONO_BOLD_PATH",
+        (
+            "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf",
+            "/usr/share/fonts/truetype/noto/NotoSansMono-Bold.ttf",
+        ),
+    ),
+}
 
 
 def find_font() -> str:
@@ -28,6 +59,21 @@ def find_font() -> str:
         if candidate and Path(candidate).is_file():
             return candidate
     raise RuntimeError("no Unicode font found; install fonts-dejavu-core or set S002_FONT_PATH")
+
+
+def find_font_variant(style: str) -> str:
+    if style == "regular":
+        return find_font()
+    env_name, candidates = FONT_VARIANTS[style]
+    for candidate in (os.environ.get(env_name), *candidates):
+        if candidate and Path(candidate).is_file():
+            return candidate
+    return find_font()
+
+
+@lru_cache(maxsize=64)
+def load_font(style: str, size: int) -> ImageFont.FreeTypeFont:
+    return ImageFont.truetype(find_font_variant(style), size)
 
 
 def _split_long_word(
@@ -278,6 +324,289 @@ def render_pdf(
     return canvas
 
 
+_INLINE_PATTERN = re.compile(
+    r"(?P<code>`[^`]+`)"
+    r"|(?P<bold>\*\*[^*]+\*\*|__[^_]+__)"
+    r"|(?P<italic>\*[^*\s][^*]*\*|_[^_\s][^_]*_)"
+    r"|(?P<link>\[[^\]]+\]\([^)\s]+\))"
+)
+_LINK_PATTERN = re.compile(r"\[([^\]]+)\]\(([^)\s]+)\)")
+_HEADING_PATTERN = re.compile(r"^(#{1,6})\s+(.*)$")
+_RULE_PATTERN = re.compile(r"^\s{0,3}([-*_])(?:\s*\1){2,}\s*$")
+_BULLET_PATTERN = re.compile(r"^(\s*)[-*+]\s+(.*)$")
+_ORDERED_PATTERN = re.compile(r"^(\s*)(\d{1,3})[.)]\s+(.*)$")
+_FENCE_PATTERN = re.compile(r"^\s*(`{3,}|~{3,})(.*)$")
+_QUOTE_PATTERN = re.compile(r"^\s{0,3}>\s?(.*)$")
+
+
+@dataclass(frozen=True)
+class Run:
+    """A stretch of inline text sharing one font style."""
+
+    text: str
+    style: str
+
+
+def _parse_inline(text: str, *, base_style: str = "regular") -> list[Run]:
+    """Split one paragraph into styled runs, dropping the markdown punctuation."""
+    code_style = "mono_bold" if base_style == "bold" else "mono"
+    runs: list[Run] = []
+    position = 0
+    for match in _INLINE_PATTERN.finditer(text):
+        if match.start() > position:
+            runs.append(Run(text[position : match.start()], base_style))
+        if match.group("code"):
+            runs.append(Run(match.group("code")[1:-1], code_style))
+        elif match.group("bold"):
+            runs.append(Run(match.group("bold")[2:-2], "bold"))
+        elif match.group("italic"):
+            # DejaVu ships no sans oblique in the minimal font package, so
+            # emphasis is flattened rather than faked with a slanted transform.
+            runs.append(Run(match.group("italic")[1:-1], base_style))
+        else:
+            label, target = _LINK_PATTERN.match(match.group("link")).groups()
+            runs.append(Run(f"{label} ({target})", base_style))
+        position = match.end()
+    if position < len(text):
+        runs.append(Run(text[position:], base_style))
+    return [run for run in runs if run.text]
+
+
+def _wrap_runs(
+    runs: list[Run],
+    fonts: dict[str, ImageFont.FreeTypeFont],
+    width: int,
+) -> list[list[tuple[str, str, float]]]:
+    """Greedily wrap styled runs into lines of (text, style, x offset) pieces.
+
+    Word boundaries come from the source text rather than the run boundaries, so
+    ``[lien](url).`` keeps its period tight against the closing parenthesis.
+    """
+    measure = ImageDraw.Draw(Image.new("L", (1, 1), 255))
+
+    tokens: list[tuple[str, str, bool]] = []
+    space_pending = False
+    for run in runs:
+        for index, word in enumerate(run.text.split(" ")):
+            if index > 0:
+                space_pending = True
+            if not word:
+                continue
+            tokens.append((word, run.style, space_pending and bool(tokens)))
+            space_pending = False
+
+    lines: list[list[tuple[str, str, float]]] = []
+    current: list[tuple[str, str, float]] = []
+    x = 0.0
+    for word, style, space_before in tokens:
+        font = fonts[style]
+        gap = measure.textlength(" ", font=font) if space_before and current else 0.0
+        word_width = measure.textlength(word, font=font)
+        if current and x + gap + word_width > width:
+            lines.append(current)
+            current, x, gap = [], 0.0, 0.0
+        if word_width > width:
+            for piece in _split_long_word(measure, word, font, width):
+                piece_width = measure.textlength(piece, font=font)
+                if current and x + gap + piece_width > width:
+                    lines.append(current)
+                    current, x, gap = [], 0.0, 0.0
+                current.append((piece, style, x + gap))
+                x += gap + piece_width
+                gap = 0.0
+            continue
+        current.append((word, style, x + gap))
+        x += gap + word_width
+    if current:
+        lines.append(current)
+    return lines
+
+
+def render_markdown(text: str, *, font_size: int = 32) -> Image.Image:
+    """Render a practical markdown subset at the printer's native width.
+
+    Supported: ATX headings, bullet and ordered lists with one nesting level,
+    fenced code, blockquotes, horizontal rules, and inline code, bold, emphasis
+    and links. Tables and image syntax fall through as plain paragraphs.
+    """
+    if not text.strip():
+        raise ValueError("enter some markdown to print")
+    base_size = max(14, min(72, int(font_size)))
+    usable_width = PRINT_WIDTH - DEFAULT_MARGIN * 2
+
+    heading_sizes = {
+        1: max(base_size + 6, round(base_size * 1.45)),
+        2: max(base_size + 4, round(base_size * 1.25)),
+        3: max(base_size + 2, round(base_size * 1.1)),
+    }
+    code_size = max(11, round(base_size * 0.8))
+    paragraph_gap = max(6, round(base_size * 0.45))
+    block_gap = max(10, round(base_size * 0.7))
+
+    def fonts_at(size: int) -> dict[str, ImageFont.FreeTypeFont]:
+        return {style: load_font(style, size) for style in ("regular", "bold", "mono", "mono_bold")}
+
+    def line_height(size: int) -> int:
+        return max(size + 8, int(size * 1.35))
+
+    # First pass: lay everything out into draw operations and measure the roll.
+    operations: list[tuple] = []
+    y = DEFAULT_MARGIN
+
+    def emit_runs(
+        runs: list[Run],
+        *,
+        size: int,
+        indent: int = 0,
+        hanging: str | None = None,
+    ) -> None:
+        nonlocal y
+        fonts = fonts_at(size)
+        width = usable_width - indent
+        marker_width = 0.0
+        if hanging is not None:
+            measure = ImageDraw.Draw(Image.new("L", (1, 1), 255))
+            marker_width = measure.textlength(f"{hanging} ", font=fonts["regular"])
+            width -= marker_width
+        lines = _wrap_runs(runs, fonts, max(40, width))
+        step = line_height(size)
+        for index, pieces in enumerate(lines or [[]]):
+            left = DEFAULT_MARGIN + indent
+            if hanging is not None:
+                if index == 0:
+                    operations.append(("text", left, y, hanging, "regular", size))
+                left += marker_width
+            for piece, style, offset in pieces:
+                operations.append(("text", left + offset, y, piece, style, size))
+            y += step
+
+    source_lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    index = 0
+    ordered_counters: dict[int, int] = {}
+    while index < len(source_lines):
+        raw = source_lines[index]
+        stripped = raw.strip()
+
+        if not stripped:
+            ordered_counters.clear()
+            y += paragraph_gap
+            index += 1
+            continue
+
+        fence = _FENCE_PATTERN.match(raw)
+        if fence:
+            marker = fence.group(1)[0] * 3
+            index += 1
+            code_lines: list[str] = []
+            while index < len(source_lines) and not source_lines[index].strip().startswith(marker):
+                code_lines.append(source_lines[index])
+                index += 1
+            index += 1  # the closing fence, or the end of the document
+            font = load_font("mono", code_size)
+            measure = ImageDraw.Draw(Image.new("L", (1, 1), 255))
+            step = line_height(code_size)
+            y += max(4, paragraph_gap // 2)
+            top = y
+            for code_line in code_lines:
+                for piece in _split_long_word(measure, code_line or " ", font, usable_width - 28):
+                    operations.append(("text", DEFAULT_MARGIN + 22, y, piece, "mono", code_size))
+                    y += step
+            operations.append(("bar", DEFAULT_MARGIN + 6, top, y))
+            y += max(4, paragraph_gap // 2)
+            ordered_counters.clear()
+            continue
+
+        if _RULE_PATTERN.match(raw):
+            y += paragraph_gap
+            operations.append(("rule", y))
+            y += paragraph_gap + 2
+            ordered_counters.clear()
+            index += 1
+            continue
+
+        heading = _HEADING_PATTERN.match(stripped)
+        if heading:
+            level = len(heading.group(1))
+            y += block_gap
+            emit_runs(
+                _parse_inline(heading.group(2), base_style="bold"),
+                size=heading_sizes.get(level, heading_sizes[3]),
+            )
+            if level == 1:
+                y += 2
+                operations.append(("rule", y))
+                y += 6
+            ordered_counters.clear()
+            index += 1
+            continue
+
+        quote = _QUOTE_PATTERN.match(raw)
+        if quote:
+            quoted = [quote.group(1)]
+            index += 1
+            while index < len(source_lines) and (nested := _QUOTE_PATTERN.match(source_lines[index])):
+                quoted.append(nested.group(1))
+                index += 1
+            top = y
+            emit_runs(_parse_inline(" ".join(quoted).strip()), size=base_size, indent=24)
+            operations.append(("bar", DEFAULT_MARGIN + 6, top, y))
+            ordered_counters.clear()
+            continue
+
+        bullet = _BULLET_PATTERN.match(raw)
+        ordered = _ORDERED_PATTERN.match(raw)
+        if bullet or ordered:
+            match = bullet or ordered
+            level = min(3, len(match.group(1)) // 2)
+            if ordered:
+                ordered_counters[level] = ordered_counters.get(level, 0) + 1
+                marker = f"{ordered_counters[level]}."
+                content = ordered.group(3)
+            else:
+                marker = "•" if level == 0 else "◦"
+                content = bullet.group(2)
+            emit_runs(_parse_inline(content), size=base_size, indent=24 * level, hanging=marker)
+            index += 1
+            continue
+
+        paragraph = [stripped]
+        index += 1
+        while index < len(source_lines):
+            follow = source_lines[index]
+            if (
+                not follow.strip()
+                or _HEADING_PATTERN.match(follow.strip())
+                or _RULE_PATTERN.match(follow)
+                or _BULLET_PATTERN.match(follow)
+                or _ORDERED_PATTERN.match(follow)
+                or _FENCE_PATTERN.match(follow)
+                or _QUOTE_PATTERN.match(follow)
+            ):
+                break
+            paragraph.append(follow.strip())
+            index += 1
+        emit_runs(_parse_inline(" ".join(paragraph)), size=base_size)
+        ordered_counters.clear()
+
+    height = y + DEFAULT_MARGIN
+    if height > MAX_HEIGHT:
+        raise ValueError("markdown is too long for one print job")
+
+    image = Image.new("L", (PRINT_WIDTH, height), 255)
+    draw = ImageDraw.Draw(image)
+    for operation in operations:
+        if operation[0] == "text":
+            _, x, top, content, style, size = operation
+            draw.text((x, top), content, font=load_font(style, size), fill=0)
+        elif operation[0] == "rule":
+            top = operation[1]
+            draw.rectangle((DEFAULT_MARGIN, top, PRINT_WIDTH - DEFAULT_MARGIN, top + 2), fill=0)
+        else:
+            _, x, top, bottom = operation
+            draw.rectangle((x, top, x + 4, max(top, bottom - 4)), fill=0)
+    return image
+
+
 def render_upload(
     filename: str,
     stream: BinaryIO,
@@ -289,6 +618,8 @@ def render_upload(
     sharpness: int = 100,
 ) -> Image.Image:
     suffix = Path(filename).suffix.lower()
+    if suffix in {".md", ".markdown"}:
+        return render_markdown(stream.read().decode("utf-8-sig"), font_size=font_size)
     if suffix == ".txt":
         return render_text(stream.read().decode("utf-8-sig"), font_size=font_size)
     if suffix == ".pdf":
@@ -300,7 +631,7 @@ def render_upload(
             sharpness=sharpness,
         )
     if suffix not in SUPPORTED_IMAGES:
-        raise ValueError("supported files: PNG, JPEG, WebP, BMP, GIF, TIFF, PDF, and TXT")
+        raise ValueError("supported files: PNG, JPEG, WebP, BMP, GIF, TIFF, PDF, TXT, and MD")
     try:
         image = Image.open(stream)
         image.seek(0)
