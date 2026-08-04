@@ -33,6 +33,8 @@
     <string>115200</string>
     <key>S002_DATA_DIR</key>
     <string>__DATA_DIR__</string>
+    <key>S002_TIMEZONE</key>
+    <string>__TIMEZONE__</string>
   </dict>
   <key>RunAtLoad</key>
   <true/>

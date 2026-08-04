@@ -10,6 +10,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from threading import Event
 
 from PIL import Image
 
@@ -21,6 +22,23 @@ ROWS_PER_FRAME = 4
 FIRMWARE_QUERY = bytes.fromhex("64 11 01 00 00 00 00 00 00 9b")
 SERIAL_QUERY = bytes.fromhex("64 12 02 00 00 00 00 00 00 9b")
 STATUS_QUERY = bytes.fromhex("64 10 02 00 00 00 00 00 00 9b")
+CANCEL_QUERY = bytes.fromhex("64 52 02 01 00 00 00 00 00 00 9b")
+
+
+class PrintCancelled(RuntimeError):
+    """Raised when the current physical print has been cancelled by the operator."""
+
+
+def _raise_if_cancelled(cancel_event: Event | None) -> None:
+    if cancel_event is not None and cancel_event.is_set():
+        raise PrintCancelled("print cancelled by operator")
+
+
+def _wait_or_cancel(cancel_event: Event | None, seconds: float) -> None:
+    if cancel_event is None:
+        time.sleep(seconds)
+    elif cancel_event.wait(seconds):
+        raise PrintCancelled("print cancelled by operator")
 
 
 def cus_frame(command: int, sequence: int, payload: bytes) -> bytes:
@@ -64,18 +82,24 @@ def raster_bytes(image: Image.Image, threshold: int = 85) -> bytes:
 def encode_print_job(
     image: Image.Image,
     *,
-    density: int = 12,
+    density: int = 7,
+    speed: int = 95,
     threshold: int = 85,
     start_sequence: int = 3,
+    trailing_feed: int = 200,
 ) -> bytes:
     """Encode an image using the exact native S002 continuous-paper job shape."""
     if density not in (7, 12, 15):
         raise ValueError("S002 density must be 7, 12, or 15")
+    if not 1 <= speed <= 255:
+        raise ValueError("S002 speed must be between 1 and 255")
+    if not 0 <= trailing_feed <= 0xFFFF:
+        raise ValueError("S002 trailing feed must be between 0 and 65535")
     if image.height < 1:
         raise ValueError("cannot print an empty image")
 
     sequence = start_sequence & 0x3F
-    frames = [cus_frame(0x0A, sequence, b"\x55")]
+    frames = [cus_frame(0x0A, sequence, bytes((speed,)))]
     sequence = (sequence + 1) & 0x3F
     frames.append(cus_frame(0x09, sequence, bytes((density,))))
     sequence = (sequence + 1) & 0x3F
@@ -86,7 +110,7 @@ def encode_print_job(
         frames.append(cus_frame(0x00, sequence, raster[offset : offset + chunk_size]))
         sequence = (sequence + 1) & 0x3F
 
-    frames.append(cus_frame(0x02, sequence, b"\xc8\x00"))
+    frames.append(cus_frame(0x02, sequence, trailing_feed.to_bytes(2, "little")))
     return b"".join(frames)
 
 
@@ -129,6 +153,7 @@ def _send_linux_rfcomm(
     mac: str,
     channel: int = 1,
     response_seconds: float = 8.0,
+    cancel_event: Event | None = None,
 ) -> PrintResult:
     """Send a prepared job through BlueZ's native RFCOMM socket."""
     if not hasattr(socket, "AF_BLUETOOTH"):
@@ -143,17 +168,33 @@ def _send_linux_rfcomm(
     )
     connection.settimeout(15)
     try:
+        _raise_if_cancelled(cancel_event)
         connection.connect((mac, channel))
-        connection.sendall(FIRMWARE_QUERY)
-        time.sleep(0.15)
-        connection.sendall(SERIAL_QUERY)
-        time.sleep(0.25)
-        connection.sendall(payload)
+        connection.settimeout(0.25)
+
+        def send_cancelable(block: bytes) -> None:
+            pending = memoryview(block)
+            while pending:
+                _raise_if_cancelled(cancel_event)
+                try:
+                    sent = connection.send(pending[:4096])
+                except TimeoutError:
+                    continue
+                if sent <= 0:
+                    raise OSError("RFCOMM socket closed during write")
+                pending = pending[sent:]
+
+        send_cancelable(FIRMWARE_QUERY)
+        _wait_or_cancel(cancel_event, 0.15)
+        send_cancelable(SERIAL_QUERY)
+        _wait_or_cancel(cancel_event, 0.25)
+        send_cancelable(payload)
 
         connection.setblocking(False)
         deadline = time.monotonic() + response_seconds
         next_status = 0.0
         while time.monotonic() < deadline:
+            _raise_if_cancelled(cancel_event)
             now = time.monotonic()
             if now >= next_status:
                 connection.sendall(STATUS_QUERY)
@@ -164,6 +205,14 @@ def _send_linux_rfcomm(
                 if not chunk:
                     break
                 replies.extend(chunk)
+    except PrintCancelled:
+        try:
+            connection.setblocking(True)
+            connection.settimeout(0.5)
+            connection.sendall(CANCEL_QUERY)
+        except OSError:
+            pass
+        raise
     finally:
         connection.close()
 
@@ -222,6 +271,7 @@ def _send_macos_serial_once(
     chunk_delay: float,
     keepalive_seconds: float,
     write_timeout: float,
+    cancel_event: Event | None = None,
 ) -> PrintResult:
     try:
         import serial
@@ -246,30 +296,43 @@ def _send_macos_serial_once(
                 if waiting:
                     replies.extend(connection.read(waiting))
 
+            def check_cancelled() -> None:
+                if cancel_event is not None and cancel_event.is_set():
+                    try:
+                        write_all(CANCEL_QUERY)
+                    except OSError:
+                        pass
+                    raise PrintCancelled("print cancelled by operator")
+
             # This mirrors the vendor app handshake. It also prevents the Mac's
             # unusually short idle SPP timeout from closing the port at startup.
+            check_cancelled()
             write_all(FIRMWARE_QUERY)
-            time.sleep(0.10)
+            _wait_or_cancel(cancel_event, 0.10)
             write_all(SERIAL_QUERY)
-            time.sleep(0.20)
+            _wait_or_cancel(cancel_event, 0.20)
             read_available()
 
             while payload_sent < len(payload):
+                check_cancelled()
                 end = min(payload_sent + chunk_size, len(payload))
                 write_all(payload[payload_sent:end])
                 payload_sent = end
                 read_available()
                 if chunk_delay:
-                    time.sleep(chunk_delay)
+                    _wait_or_cancel(cancel_event, chunk_delay)
 
             # The S002 can still be draining its tiny receive buffer after the
             # last raster frame. Valid status frames keep macOS SPP alive while
             # the thermal head finishes the job.
             deadline = time.monotonic() + keepalive_seconds
             while time.monotonic() < deadline:
+                check_cancelled()
                 write_all(STATUS_QUERY)
-                time.sleep(0.15)
+                _wait_or_cancel(cancel_event, 0.15)
                 read_available()
+    except PrintCancelled:
+        raise
     except Exception as exc:
         raise MacSerialWriteError(
             f"macOS serial link failed after {payload_sent}/{len(payload)} payload bytes: {exc}",
@@ -295,6 +358,7 @@ def _send_macos_serial(
     keepalive_seconds: float,
     write_timeout: float,
     connect_attempts: int,
+    cancel_event: Event | None = None,
 ) -> PrintResult:
     last_error: Exception | None = None
     for attempt in range(max(1, connect_attempts)):
@@ -308,6 +372,7 @@ def _send_macos_serial(
                 chunk_delay=chunk_delay,
                 keepalive_seconds=keepalive_seconds,
                 write_timeout=write_timeout,
+                cancel_event=cancel_event,
             )
         except MacSerialWriteError as exc:
             # Replaying a partially transmitted job could waste paper or print
@@ -335,6 +400,7 @@ def _send_macos_rfcomm(
     chunk_size: int,
     chunk_delay: float,
     connect_timeout: float,
+    cancel_event: Event | None = None,
 ) -> PrintResult:
     helper_path = Path(helper)
     if not helper_path.is_file():
@@ -343,29 +409,53 @@ def _send_macos_rfcomm(
             "re-run deploy/install-macos.sh"
         )
     started = time.monotonic()
+    _raise_if_cancelled(cancel_event)
+    timeout = max(connect_timeout + keepalive_seconds + 90.0, 120.0)
+    process = subprocess.Popen(
+        [
+            str(helper_path),
+            mac,
+            str(channel),
+            str(keepalive_seconds),
+            str(chunk_size),
+            str(chunk_delay),
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    communicate_started = False
+    deadline = time.monotonic() + timeout
     try:
-        result = subprocess.run(
-            [
-                str(helper_path),
-                mac,
-                str(channel),
-                str(keepalive_seconds),
-                str(chunk_size),
-                str(chunk_delay),
-            ],
-            input=payload,
-            capture_output=True,
-            timeout=max(connect_timeout + keepalive_seconds + 90.0, 120.0),
-            check=False,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise TimeoutError("native macOS RFCOMM print timed out") from exc
-    if result.returncode != 0:
-        detail = result.stderr.decode("utf-8", errors="replace").strip()
-        raise RuntimeError(detail or f"native RFCOMM helper exited {result.returncode}")
+        while True:
+            if cancel_event is not None and cancel_event.is_set():
+                process.terminate()
+                stdout, stderr = process.communicate(timeout=3)
+                raise PrintCancelled("print cancelled by operator")
+            if time.monotonic() >= deadline:
+                process.kill()
+                process.communicate()
+                raise TimeoutError("native macOS RFCOMM print timed out")
+            try:
+                stdout, stderr = process.communicate(
+                    input=None if communicate_started else payload,
+                    timeout=0.1,
+                )
+                break
+            except subprocess.TimeoutExpired:
+                communicate_started = True
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.communicate()
+    if process.returncode == 70:
+        raise PrintCancelled("print cancelled by operator")
+    if process.returncode != 0:
+        detail = stderr.decode("utf-8", errors="replace").strip()
+        raise RuntimeError(detail or f"native RFCOMM helper exited {process.returncode}")
     return PrintResult(
         sent_bytes=len(payload),
-        reply=result.stdout,
+        reply=stdout,
         elapsed_seconds=time.monotonic() - started,
     )
 
@@ -385,6 +475,7 @@ def send_print_job(
     write_timeout: float = 20.0,
     connect_attempts: int = 2,
     native_helper: str | None = None,
+    cancel_event: Event | None = None,
 ) -> PrintResult:
     """Send a prepared job with the platform's native S002 transport."""
     selected = resolve_transport(transport)
@@ -394,6 +485,7 @@ def send_print_job(
             mac=mac,
             channel=channel,
             response_seconds=response_seconds,
+            cancel_event=cancel_event,
         )
     if selected == "macos_rfcomm":
         return _send_macos_rfcomm(
@@ -405,6 +497,7 @@ def send_print_job(
             chunk_size=chunk_size,
             chunk_delay=chunk_delay,
             connect_timeout=connect_timeout,
+            cancel_event=cancel_event,
         )
     return _send_macos_serial(
         payload,
@@ -417,4 +510,5 @@ def send_print_job(
         keepalive_seconds=response_seconds,
         write_timeout=write_timeout,
         connect_attempts=connect_attempts,
+        cancel_event=cancel_event,
     )

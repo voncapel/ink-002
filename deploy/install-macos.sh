@@ -46,11 +46,19 @@ else
   "$VENV_DIR/bin/python" -m pip install -r "$APP_DIR/requirements.txt"
 fi
 
+TIMEZONE="$(readlink /etc/localtime | sed -e 's|.*/zoneinfo/||')"
+if [[ -z "$TIMEZONE" ]]; then
+  TIMEZONE="UTC"
+  echo "Could not read the system time zone. Recurring rules will use UTC." >&2
+  echo "Set S002_TIMEZONE in $PLIST to correct it." >&2
+fi
+
 sed \
   -e "s|__APP_DIR__|$APP_DIR|g" \
   -e "s|__VENV_DIR__|$VENV_DIR|g" \
   -e "s|__DATA_DIR__|$DATA_DIR|g" \
   -e "s|__LOG_DIR__|$LOG_DIR|g" \
+  -e "s|__TIMEZONE__|$TIMEZONE|g" \
   "$SOURCE_DIR/deploy/macos/com.tristan.ink002.plist.template" > "$PLIST"
 
 launchctl bootout "gui/$UID" "$PLIST" >/dev/null 2>&1 || true

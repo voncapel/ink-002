@@ -1,11 +1,19 @@
 #import <Foundation/Foundation.h>
 #import <IOBluetooth/IOBluetooth.h>
 
+#include <signal.h>
 #include <unistd.h>
 
 static const uint8_t kFirmwareQuery[] = {0x64, 0x11, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x9b};
 static const uint8_t kSerialQuery[] = {0x64, 0x12, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x9b};
 static const uint8_t kStatusQuery[] = {0x64, 0x10, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x9b};
+static const uint8_t kCancelQuery[] = {0x64, 0x52, 0x02, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x9b};
+static volatile sig_atomic_t gCancelRequested = 0;
+
+static void HandleCancelSignal(int signalNumber) {
+    (void)signalNumber;
+    gCancelRequested = 1;
+}
 
 @interface S002Delegate : NSObject <IOBluetoothRFCOMMChannelDelegate>
 @property(nonatomic, strong) NSMutableData *replies;
@@ -53,6 +61,9 @@ static BOOL WriteBytes(IOBluetoothRFCOMMChannel *channel,
     }
 
     for (NSUInteger offset = 0; offset < length; offset += chunkSize) {
+        if (gCancelRequested) {
+            return YES;
+        }
         if (![channel isOpen]) {
             *errorMessage = [NSString stringWithFormat:@"RFCOMM channel closed after %lu/%lu bytes",
                               (unsigned long)offset, (unsigned long)length];
@@ -89,6 +100,8 @@ int main(int argc, const char *argv[]) {
             fprintf(stderr, "empty S002 payload\n");
             return 65;
         }
+        signal(SIGTERM, HandleCancelSignal);
+        signal(SIGINT, HandleCancelSignal);
 
         IOBluetoothDevice *device = [IOBluetoothDevice deviceWithAddressString:address];
         if (device == nil) {
@@ -108,19 +121,27 @@ int main(int argc, const char *argv[]) {
 
         NSString *error = nil;
         BOOL ok = WriteBytes(channel, kFirmwareQuery, sizeof(kFirmwareQuery), chunkSize, 0, &error);
-        if (ok) {
+        if (ok && !gCancelRequested) {
             usleep(100000);
             ok = WriteBytes(channel, kSerialQuery, sizeof(kSerialQuery), chunkSize, 0, &error);
         }
-        if (ok) {
+        if (ok && !gCancelRequested) {
             usleep(200000);
             ok = WriteBytes(channel, payload.bytes, payload.length, chunkSize, chunkDelay, &error);
         }
 
         NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:keepaliveSeconds];
-        while (ok && !delegate.closed && [deadline timeIntervalSinceNow] > 0) {
+        while (ok && !gCancelRequested && !delegate.closed && [deadline timeIntervalSinceNow] > 0) {
             ok = WriteBytes(channel, kStatusQuery, sizeof(kStatusQuery), chunkSize, 0, &error);
             PumpRunLoop(0.15);
+        }
+        if (gCancelRequested) {
+            gCancelRequested = 0;
+            NSString *cancelError = nil;
+            WriteBytes(channel, kCancelQuery, sizeof(kCancelQuery), chunkSize, 0, &cancelError);
+            PumpRunLoop(0.12);
+            [channel closeChannel];
+            return 70;
         }
         PumpRunLoop(0.1);
         [channel closeChannel];

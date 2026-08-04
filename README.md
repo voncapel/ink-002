@@ -26,6 +26,11 @@ SDK, native Android library, or any extracted proprietary source.
   strips use one scale calculated from the tallest source strip, giving every
   printed strip the same fitted feed length without trailing white padding.
   Optional AI calculation is available only when explicitly requested.
+- Recurring print rules. A rule prints a short message on a schedule: every N
+  minutes, at fixed clock times, or a set number of semi-random times inside a
+  daily window. The interface shows the print times of the day on a timeline and
+  simulates a rule while you edit it. Random times come from the rule and the
+  date, so a restart never prints the same slot twice.
 - MTG proxy composer: paste a decklist and resolve localized card data through
   Scryfall. Print either the complete card image or a compact text-first proxy
   with mana glyphs and optional artwork. Both formats use exact 554-dot live
@@ -178,6 +183,8 @@ bold, emphasis, and links. Tables and image syntax fall through as paragraphs.
 | `S002_SERIAL_CHUNK_DELAY` | `0.05` | Legacy serial pacing |
 | `S002_RFCOMM_CHUNK_SIZE` | `0` | Native macOS write size; `0` uses the negotiated MTU |
 | `S002_RFCOMM_CHUNK_DELAY` | `0` | Native macOS pacing; keep at zero for continuous output |
+| `S002_PRINT_SPEED` | `95` | CUS motor-speed value validated with the default light density |
+| `S002_TRAIL_FEED` | `200` | Completion-frame feed value; keep the vendor default |
 | `S002_DATA_DIR` | `./data` | Runtime preview and transient job directory |
 | `S002_FONT_PATH` | auto-detected | Unicode TrueType font |
 | `S002_FONT_BOLD_PATH` | auto-detected | Bold face used by the markdown renderer |
@@ -188,6 +195,9 @@ bold, emphasis, and links. Tables and image syntax fall through as paragraphs.
 | `S002_API_TOKEN` | empty | Enables `Authorization: Bearer` and `X-API-Key` |
 | `S002_ALLOWED_PATHS` | `$S002_DATA_DIR/inbox` | Colon-separated roots printable by `path` |
 | `S002_PRINTING` | `1` | Set to `0` to queue without touching Bluetooth; used by the tests |
+| `S002_SCHEDULE` | `1` | Set to `0` to stop the recurring-rule thread; `S002_PRINTING=0` also stops it |
+| `S002_SCHEDULE_TICK` | `20` | Seconds between two schedule checks |
+| `S002_TIMEZONE` | system zone | Time zone used by the recurring rules |
 | `OPENROUTER_API_KEY` | empty | Enables vision-assisted parcel-label detection |
 | `OPENROUTER_MODEL` | `google/gemma-4-31b-it` | OpenRouter vision model slug |
 | `PORT` | `8092` | Development-server port |
@@ -215,6 +225,7 @@ command from regressions. Tests never connect to or print from the S002.
 app.py                  Flask app, queue, API, and worker
 parcel.py               vision analysis, local validation, and strip tiling
 mtg.py                  Scryfall lookup and MTG card-roll preparation
+scheduler.py            recurring print rules and their storage
 rendering.py            text/document rendering and image processing
 s002_protocol.py        CUS encoder and platform transports
 native/macos_rfcomm.m   native macOS RFCOMM helper
@@ -231,6 +242,11 @@ For implementation details, read [Architecture](docs/architecture.md) and
 ## Current limitations
 
 - One S002 printer per process.
+- Recurring rules need one running process. Do not raise the Gunicorn worker
+  count, because each worker would run its own schedule thread and print
+  duplicates.
+- A rule that was due while the application was stopped does not print later.
+  The scheduler skips a slot that is more than five minutes late.
 - Print history is transient and intentionally hidden from the interface.
 - PDF jobs are limited to 20 pages and all jobs to 30,000 raster rows.
 - The parcel editor currently uses only the first PDF page. Upload, manual crop,

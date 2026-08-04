@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#101114">
   <title>INK 002</title>
-  <link rel="stylesheet" href="{{ url_for('static', filename='styles.css', v='mtg-5') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='styles.css', v='cancel-1') }}">
 </head>
 <body>
   <header class="topbar">
@@ -17,10 +17,18 @@
       <button class="main-tab active" type="button" data-view="print" aria-selected="true">Imprimer</button>
       <button class="main-tab parcel-tab" type="button" data-view="parcel" aria-selected="false">Resize</button>
       <button class="main-tab mtg-tab" type="button" data-view="mtg" aria-selected="false">MTG</button>
+      <button class="main-tab ritual-tab" type="button" data-view="ritual" aria-selected="false">Rituels</button>
     </nav>
-    <div class="connection" id="connection" data-idle-label="{{ idle_label }}">
-      <span class="status-square" aria-hidden="true"></span>
-      <span>S002 · vérification</span>
+    <div class="topbar-actions">
+      <div class="connection" id="connection" data-idle-label="{{ idle_label }}">
+        <span class="status-square" aria-hidden="true"></span>
+        <span>S002 · vérification</span>
+      </div>
+      <button class="queue-stop" id="queue-stop" type="button" disabled aria-pressed="false" title="Annuler l’impression et vider toute la file">
+        <span class="queue-stop-icon" aria-hidden="true"></span>
+        <span class="queue-stop-label">Tout arrêter</span>
+      </button>
+      <span class="sr-only" id="queue-stop-feedback" aria-live="assertive"></span>
     </div>
   </header>
 
@@ -118,8 +126,8 @@
             <label>
               <span>Densité</span>
               <select name="density">
-                <option value="7">Claire · 07</option>
-                <option value="12" selected>Normale · 12</option>
+                <option value="7" selected>Claire · 07</option>
+                <option value="12">Normale · 12</option>
                 <option value="15">Foncée · 15</option>
               </select>
             </label>
@@ -277,8 +285,8 @@
             <label class="parcel-density">
               <span>Densité thermique</span>
               <select id="parcel-density">
-                <option value="7">Claire · 07</option>
-                <option value="12" selected>Normale · 12</option>
+                <option value="7" selected>Claire · 07</option>
+                <option value="12">Normale · 12</option>
                 <option value="15">Foncée · 15</option>
               </select>
             </label>
@@ -456,8 +464,8 @@
               <label class="parcel-density">
                 <span>Densité thermique</span>
                 <select id="mtg-density">
-                  <option value="7">Claire · 07</option>
-                  <option value="12" selected>Normale · 12</option>
+                  <option value="7" selected>Claire · 07</option>
+                  <option value="12">Normale · 12</option>
                   <option value="15">Foncée · 15</option>
                 </select>
               </label>
@@ -472,13 +480,222 @@
         </div>
       </div>
     </section>
+
+    <section class="view" id="ritual-view" aria-labelledby="ritual-title" hidden>
+      <div class="view-head">
+        <div>
+          <p class="kicker ritual-kicker">AUTOMATIQUE / <span id="ritual-tz">—</span></p>
+          <h1 id="ritual-title">Rituels</h1>
+        </div>
+        <p class="view-note">Des impressions déclenchées seules.<br>Intervalle, heures fixes ou semi-aléatoire.</p>
+      </div>
+
+      <div class="ritual-bar">
+        <div class="ritual-bar-stats">
+          <span class="ritual-stat"><b id="ritual-count-today">0</b> impressions aujourd’hui</span>
+          <span class="ritual-stat-sep" aria-hidden="true"></span>
+          <span class="ritual-stat">prochaine <b id="ritual-next">—</b></span>
+        </div>
+        <div class="ritual-bar-actions">
+          <button class="ritual-pause" id="ritual-pause" type="button" aria-pressed="false">
+            <span class="ritual-pause-icon" aria-hidden="true"></span>
+            <span class="ritual-pause-label">Tout suspendre</span>
+          </button>
+          <button class="ritual-new" id="ritual-new" type="button">
+            <span aria-hidden="true">＋</span>
+            <span>Nouveau rituel</span>
+          </button>
+        </div>
+      </div>
+
+      <section class="ritual-timeline-card" aria-labelledby="ritual-timeline-title">
+        <div class="preview-head">
+          <div>
+            <span class="tab-index">JOUR</span>
+            <strong id="ritual-timeline-title">Rythme de la journée</strong>
+          </div>
+          <span id="ritual-timeline-note">00:00 → 24:00</span>
+        </div>
+        <div class="ritual-timeline" id="ritual-timeline">
+          <p class="ritual-empty-hint">Aucun rituel actif pour aujourd’hui.</p>
+        </div>
+      </section>
+
+      <div class="ritual-grid" id="ritual-grid"></div>
+
+      <p class="ritual-empty hidden" id="ritual-empty">
+        <b>Aucun rituel</b>
+        <small>Partez d’un modèle ou créez le vôtre.</small>
+      </p>
+
+      <section class="ritual-presets" aria-labelledby="ritual-presets-title">
+        <h2 id="ritual-presets-title">Modèles</h2>
+        <div class="ritual-preset-row" id="ritual-presets"></div>
+      </section>
+    </section>
   </main>
+
+  <div class="ritual-dialog-backdrop hidden" id="ritual-dialog-backdrop"></div>
+  <div class="ritual-dialog hidden" id="ritual-dialog" role="dialog" aria-modal="true" aria-labelledby="ritual-dialog-title">
+    <form id="ritual-form" class="ritual-form">
+      <header class="ritual-dialog-head">
+        <div>
+          <span class="tab-index" id="ritual-dialog-index">RITUEL</span>
+          <strong id="ritual-dialog-title">Nouveau rituel</strong>
+        </div>
+        <button class="ritual-dialog-close" id="ritual-dialog-close" type="button" aria-label="Fermer">×</button>
+      </header>
+
+      <div class="ritual-dialog-body">
+        <div class="ritual-field-row">
+          <label class="ritual-field">
+            <span>Nom</span>
+            <input id="ritual-name" type="text" maxlength="40" placeholder="Repos des yeux" required>
+          </label>
+          <label class="ritual-field ritual-field-narrow">
+            <span>Densité</span>
+            <select id="ritual-density">
+              <option value="7" selected>Claire · 07</option>
+              <option value="12">Normale · 12</option>
+              <option value="15">Foncée · 15</option>
+            </select>
+          </label>
+        </div>
+
+        <div class="ritual-field">
+          <span>Messages <small>un par ligne · tiré à chaque impression</small></span>
+          <textarea id="ritual-messages" rows="4" placeholder="REGARDE AU LOIN&#10;30 SECONDES"></textarea>
+        </div>
+
+        <div class="ritual-field-row">
+          <label class="ritual-field ritual-field-narrow">
+            <span>Taille</span>
+            <select id="ritual-font">
+              <option value="32">Normale · 32</option>
+              <option value="44" selected>Grande · 44</option>
+              <option value="60">Affiche · 60</option>
+            </select>
+          </label>
+          <label class="ritual-field ritual-field-narrow">
+            <span>Alignement</span>
+            <select id="ritual-align">
+              <option value="center" selected>Centre</option>
+              <option value="left">Gauche</option>
+              <option value="right">Droite</option>
+            </select>
+          </label>
+          <label class="ritual-field ritual-field-narrow">
+            <span>Ordre des messages</span>
+            <select id="ritual-pick">
+              <option value="sequential" selected>À la suite</option>
+              <option value="random">Au hasard</option>
+            </select>
+          </label>
+        </div>
+
+        <fieldset class="ritual-kinds">
+          <legend>Déclenchement</legend>
+          <div class="ritual-kind-grid">
+            <label class="ritual-kind-card selected">
+              <input type="radio" name="ritual-kind" value="interval" checked>
+              <span>
+                <b>Régulier</b>
+                <small>Toutes les N minutes</small>
+              </span>
+            </label>
+            <label class="ritual-kind-card">
+              <input type="radio" name="ritual-kind" value="random">
+              <span>
+                <b>Semi-aléatoire</b>
+                <small>N fois, réparti</small>
+              </span>
+            </label>
+            <label class="ritual-kind-card">
+              <input type="radio" name="ritual-kind" value="at">
+              <span>
+                <b>Heures fixes</b>
+                <small>Liste d’horaires</small>
+              </span>
+            </label>
+          </div>
+        </fieldset>
+
+        <div class="ritual-kind-panel" id="ritual-panel-interval">
+          <label class="ritual-field">
+            <span>Intervalle · <output id="ritual-every-out">45 min</output></span>
+            <input id="ritual-every" type="range" min="5" max="240" step="5" value="45">
+          </label>
+        </div>
+
+        <div class="ritual-kind-panel hidden" id="ritual-panel-random">
+          <div class="ritual-field-row">
+            <label class="ritual-field">
+              <span>Nombre par jour · <output id="ritual-count-out">4</output></span>
+              <input id="ritual-count" type="range" min="1" max="12" step="1" value="4">
+            </label>
+            <label class="ritual-field">
+              <span>Écart minimum · <output id="ritual-gap-out">60 min</output></span>
+              <input id="ritual-gap" type="range" min="0" max="240" step="15" value="60">
+            </label>
+          </div>
+        </div>
+
+        <div class="ritual-kind-panel hidden" id="ritual-panel-at">
+          <div class="ritual-field">
+            <span>Horaires</span>
+            <div class="ritual-time-list" id="ritual-time-list"></div>
+            <button class="ritual-add-time" id="ritual-add-time" type="button">＋ Ajouter un horaire</button>
+          </div>
+        </div>
+
+        <div class="ritual-field-row" id="ritual-window-row">
+          <label class="ritual-field ritual-field-narrow">
+            <span>Début</span>
+            <input id="ritual-start" type="time" value="09:00" step="300">
+          </label>
+          <label class="ritual-field ritual-field-narrow">
+            <span>Fin</span>
+            <input id="ritual-end" type="time" value="18:00" step="300">
+          </label>
+          <label class="ritual-field ritual-field-narrow">
+            <span>Maximum par jour</span>
+            <input id="ritual-max" type="number" min="1" max="48" value="12">
+          </label>
+        </div>
+
+        <div class="ritual-field">
+          <span>Jours</span>
+          <div class="ritual-days" id="ritual-days" role="group" aria-label="Jours actifs"></div>
+        </div>
+
+        <section class="ritual-simulation" aria-live="polite">
+          <div class="ritual-simulation-head">
+            <strong>Aperçu du déclenchement</strong>
+            <span id="ritual-sim-count">—</span>
+          </div>
+          <div class="ritual-track ritual-track-large" id="ritual-sim-track"></div>
+          <p class="ritual-sim-times" id="ritual-sim-times"></p>
+        </section>
+      </div>
+
+      <footer class="ritual-dialog-foot">
+        <p class="form-error" id="ritual-error" role="alert"></p>
+        <div class="ritual-dialog-buttons">
+          <button class="ritual-secondary" id="ritual-cancel" type="button">Annuler</button>
+          <button class="ritual-primary" type="submit">
+            <span id="ritual-submit-label">Créer le rituel</span>
+            <span aria-hidden="true">→</span>
+          </button>
+        </div>
+      </footer>
+    </form>
+  </div>
 
   <footer>
     <span>{% if portable %}MODE PORTABLE · MAC LOCAL{% else %}RELAIS PRIVÉ · HOME SERVER{% endif %}</span>
     <span>{{ transport_label }}</span>
   </footer>
 
-  <script src="{{ url_for('static', filename='app.js', v='mtg-5') }}" defer></script>
+  <script src="{{ url_for('static', filename='app.js', v='cancel-1') }}" defer></script>
 </body>
 </html>

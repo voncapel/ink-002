@@ -44,6 +44,20 @@ def test_printer_width_roll_keeps_its_full_geometry() -> None:
     assert rendered.size == (554, 5_470)
 
 
+def test_images_fill_the_full_band_width_at_any_source_width() -> None:
+    for width in (200, 400, 518, 554, 1_108):
+        source = Image.new("L", (width, 120), 255)
+        source.paste(0, (0, 0, width, 120))
+
+        rendered = render_upload("edge.png", png_stream(source), dither="threshold")
+        row = rendered.height // 2
+        inked = [x for x in range(rendered.width) if rendered.getpixel((x, row)) < 128]
+
+        assert rendered.width == 554
+        assert inked[0] == 0, f"white left border for a {width}px source"
+        assert inked[-1] == 553, f"white right border for a {width}px source"
+
+
 def test_tall_image_is_scaled_only_from_its_width() -> None:
     source = Image.new("L", (1_108, 5_000), 255)
 
@@ -53,4 +67,4 @@ def test_tall_image_is_scaled_only_from_its_width() -> None:
         dither="threshold",
     )
 
-    assert rendered.size == (554, 2_374)
+    assert rendered.size == (554, 2_536)

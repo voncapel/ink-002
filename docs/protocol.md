@@ -36,6 +36,12 @@ The implementation uses these commands:
 | `0x00` | up to four packed rows | raster data |
 | `0x02` | `c8 00` | job completion/feed |
 
+The `0x02` command is the job-completion marker and carries a feed value in its
+payload. Ink 002 matches the vendor value of `200` and exposes it as
+`S002_TRAIL_FEED`. Tests on the physical printer showed that lowering this value
+does not reduce the paper gap: the firmware still applies its own leading and
+trailing margins (~20 mm each side). Keep the value at the vendor default.
+
 Firmware and serial-number queries consume sequence numbers 1 and 2, so the
 first job frame starts at sequence 3. Sequences wrap on six bits.
 

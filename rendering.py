@@ -257,12 +257,12 @@ def _fit_image(
     background = Image.new("RGBA", frame.size, "white")
     background.alpha_composite(frame)
     gray = ImageOps.autocontrast(background.convert("L"))
-    # A 554-dot image is already a complete printer-width raster. Preserve it
-    # byte-for-byte geometrically: no margins and no page-height fitting.
+    # Images fill the whole printable width: no left/right margin is applied so
+    # the full band width is used on screen and on paper. A 554-dot image is
+    # already a complete printer-width raster and is preserved byte-for-byte.
     print_ready = gray.width == PRINT_WIDTH
     margin = 0 if print_ready else DEFAULT_MARGIN
-    content_width = PRINT_WIDTH if print_ready else PRINT_WIDTH - DEFAULT_MARGIN * 2
-    scale = min(1.0, content_width / gray.width)
+    scale = PRINT_WIDTH / gray.width
     target_size = (max(1, round(gray.width * scale)), max(1, round(gray.height * scale)))
     if target_size != gray.size:
         gray = gray.resize(target_size, Image.Resampling.LANCZOS)

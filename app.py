@@ -7,10 +7,11 @@ import binascii
 import hmac
 import os
 import threading
+import time
 import uuid
 from collections import OrderedDict
 from dataclasses import asdict, dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from io import BytesIO
 from pathlib import Path
 from queue import Queue
@@ -44,7 +45,16 @@ from mtg import (
     resolve_deck,
 )
 from rendering import DITHER_PRESETS, render_markdown, render_text, render_upload
-from s002_protocol import encode_print_job, resolve_transport, send_print_job
+from s002_protocol import PrintCancelled, encode_print_job, resolve_transport, send_print_job
+from scheduler import (
+    Rule,
+    ScheduleError,
+    Scheduler,
+    count_before_cap,
+    next_occurrence,
+    preview_day,
+    resolve_timezone,
+)
 
 BASE_DIR = Path(__file__).resolve().parent
 load_dotenv(BASE_DIR / ".env")
@@ -62,6 +72,8 @@ SERIAL_CHUNK_SIZE = int(os.environ.get("S002_SERIAL_CHUNK_SIZE", "64"))
 SERIAL_CHUNK_DELAY = float(os.environ.get("S002_SERIAL_CHUNK_DELAY", "0.05"))
 RFCOMM_CHUNK_SIZE = int(os.environ.get("S002_RFCOMM_CHUNK_SIZE", "0"))
 RFCOMM_CHUNK_DELAY = float(os.environ.get("S002_RFCOMM_CHUNK_DELAY", "0"))
+PRINT_SPEED = int(os.environ.get("S002_PRINT_SPEED", "95"))
+PRINT_TRAIL_FEED = int(os.environ.get("S002_TRAIL_FEED", "200"))
 BASIC_USER = os.environ.get("S002_WEB_USER", "")
 BASIC_PASSWORD = os.environ.get("S002_WEB_PASSWORD", "")
 API_TOKEN = os.environ.get("S002_API_TOKEN", "")
@@ -70,6 +82,9 @@ MAX_HISTORY = 40
 MAX_PARCELS = 8
 MAX_MTG_DECKS = 8
 MAX_UPLOAD_BYTES = 16 * 1024 * 1024
+SCHEDULE_FILE = DATA_DIR / "schedules.json"
+SCHEDULE_TICK_SECONDS = float(os.environ.get("S002_SCHEDULE_TICK", "20"))
+SCHEDULE_ENABLED = os.environ.get("S002_SCHEDULE", "1") not in {"0", "false", "no"}
 
 # Agents name densities; the printer wants the raw vendor values.
 DENSITY_NAMES = {"light": 7, "medium": 12, "normal": 12, "dark": 15}
@@ -139,6 +154,8 @@ class Job:
 jobs: OrderedDict[str, Job] = OrderedDict()
 jobs_lock = threading.Lock()
 print_queue: Queue[str] = Queue()
+active_job_id: str | None = None
+active_cancel_event: threading.Event | None = None
 
 
 @dataclass
@@ -301,20 +318,26 @@ def save_job(
 
 
 def print_worker() -> None:
+    global active_cancel_event, active_job_id
     while True:
         job_id = print_queue.get()
         try:
             with jobs_lock:
                 job = jobs.get(job_id)
-                if job is None:
+                if job is None or job.status != "queued":
                     continue
+                cancel_event = threading.Event()
+                active_job_id = job_id
+                active_cancel_event = cancel_event
                 job.status = "printing"
                 job.started_at = now_iso()
             with Image.open(JOBS_DIR / f"{job_id}.png") as image:
                 payload = encode_print_job(
                     image,
                     density=job.density,
+                    speed=PRINT_SPEED,
                     threshold=job.threshold,
+                    trailing_feed=PRINT_TRAIL_FEED,
                 )
             result = send_print_job(
                 payload,
@@ -329,27 +352,80 @@ def print_worker() -> None:
                     if PRINTER_TRANSPORT == "macos_rfcomm"
                     else SERIAL_CHUNK_DELAY
                 ),
+                cancel_event=cancel_event,
             )
             with jobs_lock:
-                job.status = "done"
+                job.status = "cancelled" if cancel_event.is_set() else "done"
                 job.completed_at = now_iso()
-                job.sent_bytes = result.sent_bytes
-                job.reply_bytes = len(result.reply)
-                job.elapsed_seconds = round(result.elapsed_seconds, 2)
-        except Exception as exc:
+                if job.status == "done":
+                    job.sent_bytes = result.sent_bytes
+                    job.reply_bytes = len(result.reply)
+                    job.elapsed_seconds = round(result.elapsed_seconds, 2)
+        except PrintCancelled:
             with jobs_lock:
                 job = jobs.get(job_id)
                 if job is not None:
-                    job.status = "failed"
+                    job.status = "cancelled"
                     job.completed_at = now_iso()
-                    job.error = f"{type(exc).__name__}: {exc}"
-            app.logger.exception("S002 print job %s failed", job_id)
+                    job.error = None
+            app.logger.info("S002 print job %s cancelled", job_id)
+        except Exception as exc:
+            was_cancelled = False
+            with jobs_lock:
+                job = jobs.get(job_id)
+                if job is not None:
+                    was_cancelled = active_cancel_event is not None and active_cancel_event.is_set()
+                    job.status = "cancelled" if was_cancelled else "failed"
+                    job.completed_at = now_iso()
+                    job.error = None if was_cancelled else f"{type(exc).__name__}: {exc}"
+            if was_cancelled:
+                app.logger.info("S002 print job %s cancelled while transport closed", job_id)
+            else:
+                app.logger.exception("S002 print job %s failed", job_id)
         finally:
+            with jobs_lock:
+                if active_job_id == job_id:
+                    active_job_id = None
+                    active_cancel_event = None
             print_queue.task_done()
 
 
 if PRINTING_ENABLED:
     threading.Thread(target=print_worker, name="s002-print-worker", daemon=True).start()
+
+
+def print_scheduled_rule(rule: Rule, message: str) -> str:
+    """Render a rule message and push it on the normal print queue."""
+    image = render_text(message, font_size=rule.font_size, align=rule.align)
+    job = save_job(
+        image,
+        label=rule.name,
+        source="rituel",
+        density=rule.density,
+        threshold=128,
+    )
+    return job.id
+
+
+scheduler = Scheduler(
+    SCHEDULE_FILE,
+    print_scheduled_rule,
+    tz=resolve_timezone(),
+    logger=app.logger,
+)
+
+
+def schedule_worker() -> None:
+    while True:
+        time.sleep(SCHEDULE_TICK_SECONDS)
+        try:
+            scheduler.tick()
+        except Exception:
+            app.logger.exception("S002 schedule tick failed")
+
+
+if SCHEDULE_ENABLED and PRINTING_ENABLED:
+    threading.Thread(target=schedule_worker, name="s002-schedule", daemon=True).start()
 
 
 def _token_matches() -> bool:
@@ -404,7 +480,7 @@ def index():
 @app.get("/api/health")
 def health():
     with jobs_lock:
-        active = sum(job.status in {"queued", "printing"} for job in jobs.values())
+        active = sum(job.status in {"queued", "printing", "cancelling"} for job in jobs.values())
     return jsonify(
         {
             "ok": True,
@@ -528,7 +604,7 @@ def print_parcel(parcel_id: str):
         session = get_parcel_session(parcel_id)
         if session is None:
             return jsonify({"error": "parcel analysis not found"}), 404
-        density = int(request.form.get("density", "12"))
+        density = int(request.form.get("density", "7"))
         if density not in {7, 12, 15}:
             raise ValueError("density must be light, medium, or dark")
         with Image.open(PARCELS_DIR / f"{parcel_id}-roll.png") as source:
@@ -723,7 +799,7 @@ def print_mtg_deck(deck_id):
             return jsonify({"error": "deck not found"}), 404
         if not deck.batches:
             raise MtgError("préparer le rouleau avant d'imprimer")
-        density = int(request.form.get("density", "12"))
+        density = int(request.form.get("density", "7"))
         if density not in {7, 12, 15}:
             raise ValueError("density must be light, medium, or dark")
         job_ids: list[str] = []
@@ -998,6 +1074,33 @@ def list_jobs():
     return jsonify({"jobs": recent})
 
 
+@app.post("/api/jobs/cancel-all")
+def cancel_all_jobs():
+    cancelled_queued = 0
+    active_cancel_requested = False
+    completed_at = now_iso()
+    with jobs_lock:
+        for job in jobs.values():
+            if job.status == "queued":
+                job.status = "cancelled"
+                job.completed_at = completed_at
+                job.error = None
+                cancelled_queued += 1
+            elif job.status in {"printing", "cancelling"}:
+                job.status = "cancelling"
+        if active_cancel_event is not None:
+            active_cancel_event.set()
+            active_cancel_requested = True
+    return jsonify(
+        {
+            "ok": True,
+            "cancelled_queued": cancelled_queued,
+            "active_cancel_requested": active_cancel_requested,
+            "cancelled_total": cancelled_queued + int(active_cancel_requested),
+        }
+    )
+
+
 @app.get("/api/jobs/<job_id>")
 def get_job(job_id: str):
     with jobs_lock:
@@ -1021,7 +1124,7 @@ def preview(job_id: str):
 @app.post("/api/jobs")
 def create_job():
     try:
-        density = int(request.form.get("density", "12"))
+        density = int(request.form.get("density", "7"))
         threshold = int(request.form.get("threshold", "85"))
         font_size = int(request.form.get("font_size", "32"))
         align = request.form.get("align", "left")
@@ -1073,6 +1176,82 @@ def create_job():
         return jsonify(job.public()), 202
     except (RuntimeError, ValueError) as exc:
         return jsonify({"error": str(exc)}), 400
+
+
+@app.get("/api/schedules")
+def list_schedules():
+    return jsonify(scheduler.public())
+
+
+@app.post("/api/schedules/preview")
+def preview_schedule():
+    """Validate an unsaved rule and return its plan, for live editing."""
+    try:
+        rule = Rule.from_dict(request.get_json(silent=True) or {}, rule_id="preview")
+    except ScheduleError as exc:
+        return jsonify({"error": str(exc)}), 400
+    now = datetime.now(scheduler.tz)
+    upcoming = next_occurrence(rule, scheduler.tz, now)
+    days = []
+    for offset in range(7):
+        day = now.date() + timedelta(days=offset)
+        days.append({"date": day.isoformat(), "times": preview_day(rule, scheduler.tz, day)})
+    return jsonify(
+        {
+            "today_plan": days[0]["times"],
+            "days": days,
+            "next_at": upcoming.isoformat() if upcoming else None,
+            "capped": count_before_cap(rule, now.date(), scheduler.tz) > rule.max_per_day,
+            "max_per_day": rule.max_per_day,
+        }
+    )
+
+
+@app.post("/api/schedules")
+def create_schedule():
+    try:
+        rule = scheduler.add(request.get_json(silent=True) or {})
+    except ScheduleError as exc:
+        return jsonify({"error": str(exc)}), 400
+    return jsonify({"rule": rule.to_dict(), "state": scheduler.public()}), 201
+
+
+@app.patch("/api/schedules/<rule_id>")
+def update_schedule(rule_id: str):
+    try:
+        rule = scheduler.update(rule_id, request.get_json(silent=True) or {})
+    except KeyError:
+        return jsonify({"error": "rule not found"}), 404
+    except ScheduleError as exc:
+        return jsonify({"error": str(exc)}), 400
+    return jsonify({"rule": rule.to_dict(), "state": scheduler.public()})
+
+
+@app.delete("/api/schedules/<rule_id>")
+def delete_schedule(rule_id: str):
+    try:
+        scheduler.delete(rule_id)
+    except KeyError:
+        return jsonify({"error": "rule not found"}), 404
+    return jsonify({"ok": True, "state": scheduler.public()})
+
+
+@app.post("/api/schedules/<rule_id>/run")
+def run_schedule_now(rule_id: str):
+    try:
+        job_id = scheduler.run_now(rule_id)
+    except KeyError:
+        return jsonify({"error": "rule not found"}), 404
+    except (RuntimeError, ValueError) as exc:
+        return jsonify({"error": str(exc)}), 400
+    return jsonify({"ok": True, "job_id": job_id}), 202
+
+
+@app.post("/api/schedules/pause")
+def pause_schedules():
+    payload = request.get_json(silent=True) or {}
+    paused = scheduler.set_paused(bool(payload.get("paused", True)))
+    return jsonify({"ok": True, "paused": paused})
 
 
 @app.errorhandler(413)

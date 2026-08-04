@@ -13,6 +13,9 @@ const errorBox = document.querySelector("#form-error");
 const printState = document.querySelector("#print-state");
 const submitButton = form.querySelector("button[type=submit]");
 const connection = document.querySelector("#connection");
+const queueStopButton = document.querySelector("#queue-stop");
+const queueStopLabel = queueStopButton.querySelector(".queue-stop-label");
+const queueStopFeedback = document.querySelector("#queue-stop-feedback");
 const parcelForm = document.querySelector("#parcel-form");
 const parcelFile = document.querySelector("#parcel-file");
 const parcelFileLabel = document.querySelector("#parcel-file-label");
@@ -44,6 +47,8 @@ let currentJobId = null;
 let currentJobStateTarget = printState;
 let currentJobErrorTarget = errorBox;
 let pollTimer = null;
+let queueStopArmTimer = null;
+let queueStopInFlight = false;
 let currentParcelId = null;
 let currentParcelDraftId = null;
 let parcelDraft = null;
@@ -106,10 +111,11 @@ document.querySelectorAll('.range-control input[type="range"]').forEach((input) 
 
 function grayscaleFrame(image) {
   const printReady = image.naturalWidth === 554;
-  const contentWidth = printReady ? 554 : 518;
   // A thermal roll has no page height. Only its physical width may constrain
   // the source; scaling against the preview viewport would shrink long jobs.
-  const scale = Math.min(1, contentWidth / image.naturalWidth);
+  // Images always fill the full 554-dot band: narrower sources are enlarged
+  // rather than left floating with white borders on each side.
+  const scale = 554 / image.naturalWidth;
   const width = Math.max(1, Math.round(image.naturalWidth * scale));
   const height = Math.max(1, Math.round(image.naturalHeight * scale));
   const canvas = document.createElement("canvas");
@@ -820,9 +826,12 @@ async function refreshHealth() {
     const busy = data.active_jobs > 0;
     connection.className = `connection ${busy ? "busy" : "ready"}`;
     connection.querySelector("span:last-child").textContent = busy ? "S002 · impression" : connection.dataset.idleLabel;
+    queueStopButton.disabled = !busy || queueStopInFlight;
+    if (!busy) resetQueueStop();
   } catch (_error) {
     connection.className = "connection";
     connection.querySelector("span:last-child").textContent = "S002 · hors ligne";
+    queueStopButton.disabled = true;
   }
 }
 
@@ -834,6 +843,7 @@ async function refreshCurrentJob() {
     const job = await response.json();
     if (job.status === "queued") currentJobStateTarget.textContent = "Impression en attente";
     if (job.status === "printing") currentJobStateTarget.textContent = "Impression en cours…";
+    if (job.status === "cancelling") currentJobStateTarget.textContent = "Arrêt de l’impression…";
     if (job.status === "done") {
       currentJobStateTarget.textContent = "Impression terminée ✓";
       currentJobId = null;
@@ -841,6 +851,10 @@ async function refreshCurrentJob() {
     if (job.status === "failed") {
       currentJobStateTarget.textContent = "";
       currentJobErrorTarget.textContent = job.error || "Échec de l’impression";
+      currentJobId = null;
+    }
+    if (job.status === "cancelled") {
+      currentJobStateTarget.textContent = "Impression annulée";
       currentJobId = null;
     }
   } catch (_error) {
@@ -855,6 +869,51 @@ function schedulePoll() {
     schedulePoll();
   }, 1600);
 }
+
+function resetQueueStop() {
+  clearTimeout(queueStopArmTimer);
+  queueStopButton.classList.remove("armed", "stopping");
+  queueStopButton.setAttribute("aria-pressed", "false");
+  queueStopLabel.textContent = "Tout arrêter";
+}
+
+queueStopButton.addEventListener("click", async () => {
+  if (queueStopButton.disabled || queueStopInFlight) return;
+  if (!queueStopButton.classList.contains("armed")) {
+    queueStopButton.classList.add("armed");
+    queueStopButton.setAttribute("aria-pressed", "true");
+    queueStopLabel.textContent = "Confirmer l’arrêt";
+    queueStopFeedback.textContent = "Appuyez une seconde fois pour arrêter l’impression et vider la file.";
+    clearTimeout(queueStopArmTimer);
+    queueStopArmTimer = setTimeout(resetQueueStop, 4000);
+    return;
+  }
+
+  clearTimeout(queueStopArmTimer);
+  queueStopInFlight = true;
+  queueStopButton.classList.remove("armed");
+  queueStopButton.classList.add("stopping");
+  queueStopButton.setAttribute("aria-pressed", "false");
+  queueStopButton.disabled = true;
+  queueStopLabel.textContent = "Arrêt…";
+  try {
+    const response = await fetch("/api/jobs/cancel-all", { method: "POST" });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || "Impossible d’arrêter la file");
+    const count = result.cancelled_total || 0;
+    currentJobStateTarget.textContent = count > 1 ? `${count} impressions annulées` : "Impression annulée";
+    currentJobErrorTarget.textContent = "";
+    currentJobId = null;
+    queueStopFeedback.textContent = `${count} impression${count > 1 ? "s" : ""} annulée${count > 1 ? "s" : ""}.`;
+  } catch (error) {
+    currentJobErrorTarget.textContent = error.message;
+    queueStopFeedback.textContent = error.message;
+  } finally {
+    await refreshHealth();
+    queueStopInFlight = false;
+    setTimeout(refreshHealth, 600);
+  }
+});
 
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -1143,3 +1202,557 @@ mtgPrintButton.addEventListener("click", async () => {
     mtgPrintButton.querySelector("span:first-child").textContent = "Imprimer les lots";
   }
 });
+
+/* ------------------------------------------------------------------ rituels */
+
+const ritualView = document.querySelector("#ritual-view");
+const ritualGrid = document.querySelector("#ritual-grid");
+const ritualEmpty = document.querySelector("#ritual-empty");
+const ritualTimeline = document.querySelector("#ritual-timeline");
+const ritualPresets = document.querySelector("#ritual-presets");
+const ritualPauseButton = document.querySelector("#ritual-pause");
+const ritualNewButton = document.querySelector("#ritual-new");
+const ritualCountToday = document.querySelector("#ritual-count-today");
+const ritualNextLabel = document.querySelector("#ritual-next");
+const ritualTzLabel = document.querySelector("#ritual-tz");
+const ritualDialog = document.querySelector("#ritual-dialog");
+const ritualBackdrop = document.querySelector("#ritual-dialog-backdrop");
+const ritualForm = document.querySelector("#ritual-form");
+const ritualError = document.querySelector("#ritual-error");
+const ritualDialogTitle = document.querySelector("#ritual-dialog-title");
+const ritualDialogIndex = document.querySelector("#ritual-dialog-index");
+const ritualSubmitLabel = document.querySelector("#ritual-submit-label");
+const ritualDaysBox = document.querySelector("#ritual-days");
+const ritualTimeList = document.querySelector("#ritual-time-list");
+const ritualSimTrack = document.querySelector("#ritual-sim-track");
+const ritualSimTimes = document.querySelector("#ritual-sim-times");
+const ritualSimCount = document.querySelector("#ritual-sim-count");
+const ritualWindowRow = document.querySelector("#ritual-window-row");
+
+const DAY_LABELS = ["Lu", "Ma", "Me", "Je", "Ve", "Sa", "Di"];
+const KIND_LABELS = { interval: "Régulier", random: "Semi-aléatoire", at: "Heures fixes" };
+
+let ritualState = { rules: [], presets: [], paused: false };
+let ritualEditingId = null;
+let ritualSelectedDays = new Set([1, 2, 3, 4, 5]);
+let ritualSimTimer = null;
+let ritualRefreshTimer = null;
+
+function minutesOf(hhmm) {
+  const [hour, minute] = String(hhmm || "0:0").split(":").map(Number);
+  return (hour || 0) * 60 + (minute || 0);
+}
+
+function nowMinutes() {
+  const now = new Date();
+  return now.getHours() * 60 + now.getMinutes();
+}
+
+function relativeTime(iso) {
+  if (!iso) return "—";
+  const target = new Date(iso);
+  if (Number.isNaN(target.getTime())) return "—";
+  const clock = target.toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" });
+  const minutes = Math.round((target.getTime() - Date.now()) / 60000);
+  if (minutes < 0) return clock;
+  if (minutes < 1) return "maintenant";
+  if (minutes < 60) return `${clock} · dans ${minutes} min`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${clock} · dans ${hours} h`;
+  return `${target.toLocaleDateString("fr-FR", { weekday: "short" })} ${clock}`;
+}
+
+function buildTrack(container, times, options = {}) {
+  container.textContent = "";
+  const { start, end, showNow = true } = options;
+  if (start !== undefined && end !== undefined && end > start) {
+    const window = document.createElement("span");
+    window.className = "ritual-track-window";
+    window.style.left = `${(start / 1440) * 100}%`;
+    window.style.width = `${((end - start) / 1440) * 100}%`;
+    container.append(window);
+  }
+  const current = nowMinutes();
+  times.forEach((time) => {
+    const minutes = minutesOf(time);
+    const tick = document.createElement("span");
+    tick.className = minutes < current ? "ritual-tick past" : "ritual-tick";
+    tick.style.left = `${(minutes / 1440) * 100}%`;
+    tick.title = time;
+    container.append(tick);
+  });
+  if (showNow) {
+    const marker = document.createElement("span");
+    marker.className = "ritual-track-now";
+    marker.style.left = `${(current / 1440) * 100}%`;
+    marker.title = "maintenant";
+    container.append(marker);
+  }
+}
+
+function ritualCard(rule) {
+  const card = document.createElement("article");
+  card.className = rule.enabled ? "ritual-card" : "ritual-card off";
+
+  const head = document.createElement("div");
+  head.className = "ritual-card-head";
+  const title = document.createElement("strong");
+  title.textContent = rule.name;
+  const toggle = document.createElement("button");
+  toggle.type = "button";
+  toggle.className = "ritual-switch";
+  toggle.setAttribute("aria-pressed", String(rule.enabled));
+  toggle.setAttribute("aria-label", `Activer ${rule.name}`);
+  toggle.addEventListener("click", () => ritualPatch(rule.id, { enabled: !rule.enabled }));
+  head.append(title, toggle);
+
+  const body = document.createElement("div");
+  body.className = "ritual-card-body";
+
+  const message = document.createElement("p");
+  message.className = "ritual-card-message";
+  message.textContent = rule.messages[0];
+  body.append(message);
+  if (rule.messages.length > 1) {
+    const more = document.createElement("span");
+    more.className = "ritual-card-more";
+    more.textContent = `+ ${rule.messages.length - 1} autre${rule.messages.length > 2 ? "s" : ""} message${rule.messages.length > 2 ? "s" : ""}`;
+    body.append(more);
+  }
+
+  const chips = document.createElement("div");
+  chips.className = "ritual-card-rule";
+  const detail = rule.kind === "interval"
+    ? `toutes les ${rule.every_minutes} min`
+    : rule.kind === "random"
+      ? `${rule.count}× par jour`
+      : rule.times.join(" · ");
+  [
+    { text: KIND_LABELS[rule.kind], accent: true },
+    { text: detail },
+    { text: rule.kind === "at" ? `${rule.days.length} j/7` : `${rule.start} → ${rule.end}` },
+  ].forEach((item) => {
+    const chip = document.createElement("span");
+    chip.className = item.accent ? "ritual-chip accent" : "ritual-chip";
+    chip.textContent = item.text;
+    chips.append(chip);
+  });
+  body.append(chips);
+
+  const track = document.createElement("div");
+  track.className = "ritual-track";
+  buildTrack(track, rule.today_plan, { start: minutesOf(rule.start), end: minutesOf(rule.end) });
+  body.append(track);
+
+  const next = document.createElement("div");
+  next.className = "ritual-card-next";
+  const nextValue = document.createElement("span");
+  nextValue.innerHTML = `Prochaine · <b>${relativeTime(rule.next_at)}</b>`;
+  const fired = document.createElement("span");
+  fired.textContent = `${rule.fired_today}/${rule.max_per_day} aujourd’hui`;
+  next.append(nextValue, fired);
+  body.append(next);
+
+  const foot = document.createElement("div");
+  foot.className = "ritual-card-foot";
+  const runButton = document.createElement("button");
+  runButton.type = "button";
+  runButton.className = "ritual-run";
+  runButton.textContent = "Imprimer maintenant";
+  runButton.addEventListener("click", () => ritualRunNow(rule.id, runButton));
+  const editButton = document.createElement("button");
+  editButton.type = "button";
+  editButton.textContent = "Modifier";
+  editButton.addEventListener("click", () => openRitualDialog(rule));
+  const deleteButton = document.createElement("button");
+  deleteButton.type = "button";
+  deleteButton.className = "ritual-delete";
+  deleteButton.textContent = "Supprimer";
+  deleteButton.addEventListener("click", () => ritualDelete(rule));
+  foot.append(runButton, editButton, deleteButton);
+
+  card.append(head, body, foot);
+  return card;
+}
+
+function renderRitualTimeline() {
+  const active = ritualState.rules.filter((rule) => rule.enabled && rule.today_plan.length > 0);
+  ritualTimeline.textContent = "";
+  if (active.length === 0) {
+    const hint = document.createElement("p");
+    hint.className = "ritual-empty-hint";
+    hint.textContent = "Aucun rituel actif pour aujourd’hui.";
+    ritualTimeline.append(hint);
+    return;
+  }
+  active.forEach((rule) => {
+    const lane = document.createElement("div");
+    lane.className = "ritual-lane";
+    const name = document.createElement("div");
+    name.className = "ritual-lane-name";
+    const label = document.createElement("b");
+    label.textContent = rule.name;
+    const count = document.createElement("small");
+    count.textContent = `${rule.today_plan.length}×`;
+    name.append(label, count);
+    const track = document.createElement("div");
+    track.className = "ritual-track";
+    buildTrack(track, rule.today_plan, { start: minutesOf(rule.start), end: minutesOf(rule.end) });
+    lane.append(name, track);
+    ritualTimeline.append(lane);
+  });
+  const hours = document.createElement("div");
+  hours.className = "ritual-lane";
+  const spacer = document.createElement("span");
+  const scale = document.createElement("div");
+  scale.className = "ritual-track-hours";
+  ["00", "06", "12", "18", "24"].forEach((hour) => {
+    const mark = document.createElement("span");
+    mark.textContent = hour;
+    scale.append(mark);
+  });
+  hours.append(spacer, scale);
+  ritualTimeline.append(hours);
+}
+
+function renderRituals() {
+  ritualGrid.textContent = "";
+  ritualState.rules.forEach((rule) => ritualGrid.append(ritualCard(rule)));
+  ritualEmpty.classList.toggle("hidden", ritualState.rules.length > 0);
+  renderRitualTimeline();
+
+  const planned = ritualState.rules
+    .filter((rule) => rule.enabled)
+    .reduce((total, rule) => total + rule.today_plan.length, 0);
+  ritualCountToday.textContent = String(planned);
+  const upcoming = ritualState.rules
+    .filter((rule) => rule.enabled && rule.next_at)
+    .map((rule) => rule.next_at)
+    .sort()[0];
+  ritualNextLabel.textContent = ritualState.paused ? "suspendu" : relativeTime(upcoming);
+  ritualTzLabel.textContent = ritualState.timezone || "—";
+  ritualPauseButton.setAttribute("aria-pressed", String(ritualState.paused));
+  ritualPauseButton.querySelector(".ritual-pause-label").textContent =
+    ritualState.paused ? "Reprendre" : "Tout suspendre";
+}
+
+function renderRitualPresets() {
+  ritualPresets.textContent = "";
+  ritualState.presets.forEach((preset) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "ritual-preset";
+    const name = document.createElement("b");
+    name.textContent = preset.name;
+    const detail = document.createElement("small");
+    detail.textContent = preset.kind === "interval"
+      ? `Toutes les ${preset.every_minutes} min · ${preset.start}–${preset.end}`
+      : preset.kind === "random"
+        ? `${preset.count}× réparti · ${preset.start}–${preset.end}`
+        : preset.times.join(" · ");
+    button.append(name, detail);
+    button.addEventListener("click", () => openRitualDialog(preset, { fromPreset: true }));
+    ritualPresets.append(button);
+  });
+}
+
+async function loadRituals() {
+  try {
+    const response = await fetch("/api/schedules", { cache: "no-store" });
+    if (!response.ok) return;
+    ritualState = await response.json();
+    renderRituals();
+    if (ritualPresets.childElementCount === 0) renderRitualPresets();
+  } catch (error) {
+    /* keep the last known state */
+  }
+}
+
+function applyRitualState(payload) {
+  if (payload && payload.state) {
+    ritualState = payload.state;
+    renderRituals();
+  } else {
+    loadRituals();
+  }
+}
+
+async function ritualPatch(ruleId, changes) {
+  const response = await fetch(`/api/schedules/${ruleId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(changes),
+  });
+  applyRitualState(await response.json());
+}
+
+async function ritualDelete(rule) {
+  if (!window.confirm(`Supprimer le rituel « ${rule.name} » ?`)) return;
+  const response = await fetch(`/api/schedules/${rule.id}`, { method: "DELETE" });
+  applyRitualState(await response.json());
+}
+
+async function ritualRunNow(ruleId, button) {
+  button.disabled = true;
+  button.textContent = "En file…";
+  try {
+    const response = await fetch(`/api/schedules/${ruleId}/run`, { method: "POST" });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || "Impression impossible");
+    currentJobId = result.job_id;
+    currentJobStateTarget = printState;
+    currentJobErrorTarget = errorBox;
+    await refreshHealth();
+    button.textContent = "Envoyé ✓";
+  } catch (error) {
+    button.textContent = "Échec";
+  } finally {
+    window.setTimeout(() => {
+      button.disabled = false;
+      button.textContent = "Imprimer maintenant";
+    }, 1600);
+  }
+}
+
+ritualPauseButton.addEventListener("click", async () => {
+  const paused = ritualPauseButton.getAttribute("aria-pressed") !== "true";
+  await fetch("/api/schedules/pause", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ paused }),
+  });
+  await loadRituals();
+});
+
+/* ------------------------------------------------------------ dialog édition */
+
+function ritualDaysRender() {
+  ritualDaysBox.textContent = "";
+  DAY_LABELS.forEach((label, index) => {
+    const day = index + 1;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "ritual-day";
+    button.textContent = label;
+    button.setAttribute("aria-pressed", String(ritualSelectedDays.has(day)));
+    button.addEventListener("click", () => {
+      if (ritualSelectedDays.has(day)) ritualSelectedDays.delete(day);
+      else ritualSelectedDays.add(day);
+      button.setAttribute("aria-pressed", String(ritualSelectedDays.has(day)));
+      scheduleSimulation();
+    });
+    ritualDaysBox.append(button);
+  });
+}
+
+function addTimeRow(value = "12:00") {
+  const item = document.createElement("div");
+  item.className = "ritual-time-item";
+  const input = document.createElement("input");
+  input.type = "time";
+  input.step = "300";
+  input.value = value;
+  input.addEventListener("input", scheduleSimulation);
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "ritual-time-remove";
+  remove.textContent = "×";
+  remove.setAttribute("aria-label", "Retirer cet horaire");
+  remove.addEventListener("click", () => {
+    item.remove();
+    scheduleSimulation();
+  });
+  item.append(input, remove);
+  ritualTimeList.append(item);
+}
+
+function currentKind() {
+  return document.querySelector('input[name="ritual-kind"]:checked').value;
+}
+
+function syncKindPanels() {
+  const kind = currentKind();
+  document.querySelectorAll(".ritual-kind-card").forEach((card) => {
+    card.classList.toggle("selected", card.querySelector("input").checked);
+  });
+  document.querySelector("#ritual-panel-interval").classList.toggle("hidden", kind !== "interval");
+  document.querySelector("#ritual-panel-random").classList.toggle("hidden", kind !== "random");
+  document.querySelector("#ritual-panel-at").classList.toggle("hidden", kind !== "at");
+  ritualWindowRow.querySelectorAll("input[type=time]").forEach((input) => {
+    input.closest("label").classList.toggle("hidden", kind === "at");
+  });
+}
+
+function readRitualForm() {
+  const kind = currentKind();
+  const messages = document.querySelector("#ritual-messages").value
+    .split(/\n{2,}/)
+    .map((block) => block.trim())
+    .filter(Boolean);
+  return {
+    name: document.querySelector("#ritual-name").value.trim(),
+    messages: messages.length > 0 ? messages : [""],
+    pick: document.querySelector("#ritual-pick").value,
+    font_size: Number(document.querySelector("#ritual-font").value),
+    align: document.querySelector("#ritual-align").value,
+    density: Number(document.querySelector("#ritual-density").value),
+    days: [...ritualSelectedDays].sort(),
+    start: document.querySelector("#ritual-start").value || "09:00",
+    end: document.querySelector("#ritual-end").value || "18:00",
+    kind,
+    every_minutes: Number(document.querySelector("#ritual-every").value),
+    count: Number(document.querySelector("#ritual-count").value),
+    min_gap_minutes: Number(document.querySelector("#ritual-gap").value),
+    max_per_day: Number(document.querySelector("#ritual-max").value),
+    times: [...ritualTimeList.querySelectorAll("input[type=time]")]
+      .map((input) => input.value)
+      .filter(Boolean),
+  };
+}
+
+function scheduleSimulation() {
+  document.querySelector("#ritual-every-out").textContent =
+    `${document.querySelector("#ritual-every").value} min`;
+  document.querySelector("#ritual-count-out").textContent =
+    document.querySelector("#ritual-count").value;
+  const gap = Number(document.querySelector("#ritual-gap").value);
+  document.querySelector("#ritual-gap-out").textContent = gap === 0 ? "aucun" : `${gap} min`;
+  window.clearTimeout(ritualSimTimer);
+  ritualSimTimer = window.setTimeout(runSimulation, 180);
+}
+
+async function runSimulation() {
+  const payload = readRitualForm();
+  if (!payload.name) payload.name = "Aperçu";
+  if (payload.messages.every((item) => !item)) {
+    buildTrack(ritualSimTrack, []);
+    ritualSimCount.textContent = "—";
+    ritualSimTimes.textContent = "Écrivez un message pour voir le rythme.";
+    return;
+  }
+  try {
+    const response = await fetch("/api/schedules/preview", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const result = await response.json();
+    if (!response.ok) {
+      ritualSimCount.textContent = "—";
+      ritualSimTimes.textContent = result.error || "";
+      buildTrack(ritualSimTrack, []);
+      return;
+    }
+    const times = result.today_plan;
+    const start = payload.kind === "at" ? undefined : minutesOf(payload.start);
+    const end = payload.kind === "at" ? undefined : minutesOf(payload.end);
+    buildTrack(ritualSimTrack, times, { start, end });
+    ritualSimCount.textContent = times.length === 0
+      ? "rien aujourd’hui"
+      : `${times.length} impression${times.length > 1 ? "s" : ""} aujourd’hui`;
+    if (times.length === 0) {
+      ritualSimTimes.textContent = "Ce jour n’est pas sélectionné, ou la fenêtre est vide.";
+    } else if (result.capped) {
+      ritualSimTimes.textContent =
+        `${times.join("   ")}\nLimité à ${result.max_per_day} par jour · la fin de la fenêtre est coupée.`;
+    } else {
+      ritualSimTimes.textContent = times.join("   ");
+    }
+    ritualError.textContent = "";
+  } catch (error) {
+    ritualSimTimes.textContent = "";
+  }
+}
+
+function openRitualDialog(rule = null, options = {}) {
+  const fromPreset = Boolean(options.fromPreset);
+  ritualEditingId = rule && !fromPreset ? rule.id : null;
+  ritualError.textContent = "";
+  ritualDialogTitle.textContent = ritualEditingId ? "Modifier le rituel" : "Nouveau rituel";
+  ritualDialogIndex.textContent = ritualEditingId ? "ÉDITION" : "RITUEL";
+  ritualSubmitLabel.textContent = ritualEditingId ? "Enregistrer" : "Créer le rituel";
+
+  const base = rule || {};
+  document.querySelector("#ritual-name").value = base.name || "";
+  document.querySelector("#ritual-messages").value = (base.messages || []).join("\n\n");
+  document.querySelector("#ritual-pick").value = base.pick || "sequential";
+  document.querySelector("#ritual-font").value = String(base.font_size || 44);
+  document.querySelector("#ritual-align").value = base.align || "center";
+  document.querySelector("#ritual-density").value = String(base.density || 7);
+  document.querySelector("#ritual-start").value = base.start || "09:00";
+  document.querySelector("#ritual-end").value = base.end || "18:00";
+  document.querySelector("#ritual-max").value = String(base.max_per_day || 12);
+  document.querySelector("#ritual-every").value = String(base.every_minutes || 45);
+  document.querySelector("#ritual-count").value = String(base.count || 4);
+  document.querySelector("#ritual-gap").value = String(base.min_gap_minutes ?? 60);
+
+  const kind = base.kind || "interval";
+  document.querySelector(`input[name="ritual-kind"][value="${kind}"]`).checked = true;
+  ritualSelectedDays = new Set(base.days && base.days.length > 0 ? base.days : [1, 2, 3, 4, 5]);
+  ritualDaysRender();
+  ritualTimeList.textContent = "";
+  ((base.times && base.times.length > 0) ? base.times : ["10:30"]).forEach(addTimeRow);
+
+  syncKindPanels();
+  scheduleSimulation();
+  ritualBackdrop.classList.remove("hidden");
+  ritualDialog.classList.remove("hidden");
+  document.querySelector("#ritual-name").focus();
+}
+
+function closeRitualDialog() {
+  ritualDialog.classList.add("hidden");
+  ritualBackdrop.classList.add("hidden");
+  ritualEditingId = null;
+}
+
+ritualNewButton.addEventListener("click", () => openRitualDialog());
+document.querySelector("#ritual-dialog-close").addEventListener("click", closeRitualDialog);
+document.querySelector("#ritual-cancel").addEventListener("click", closeRitualDialog);
+ritualBackdrop.addEventListener("click", closeRitualDialog);
+document.querySelector("#ritual-add-time").addEventListener("click", () => {
+  addTimeRow();
+  scheduleSimulation();
+});
+document.querySelectorAll('input[name="ritual-kind"]').forEach((input) => {
+  input.addEventListener("change", () => {
+    syncKindPanels();
+    scheduleSimulation();
+  });
+});
+["#ritual-every", "#ritual-count", "#ritual-gap", "#ritual-start", "#ritual-end", "#ritual-max"]
+  .forEach((selector) => {
+    document.querySelector(selector).addEventListener("input", scheduleSimulation);
+  });
+
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !ritualDialog.classList.contains("hidden")) closeRitualDialog();
+});
+
+ritualForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const payload = readRitualForm();
+  const submit = ritualForm.querySelector("button[type=submit]");
+  submit.disabled = true;
+  try {
+    const url = ritualEditingId ? `/api/schedules/${ritualEditingId}` : "/api/schedules";
+    const response = await fetch(url, {
+      method: ritualEditingId ? "PATCH" : "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || "Rituel invalide");
+    applyRitualState(result);
+    closeRitualDialog();
+  } catch (error) {
+    ritualError.textContent = error.message;
+  } finally {
+    submit.disabled = false;
+  }
+});
+
+loadRituals();
+ritualRefreshTimer = window.setInterval(() => {
+  if (!ritualView.hidden) loadRituals();
+}, 30000);
